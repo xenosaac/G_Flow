@@ -9,13 +9,21 @@
   },
   "scripts": {
     "test": "bun test",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "console:dev": "next dev src/console --port 3030",
+    "console:build": "next build src/console",
+    "console:start": "next start src/console --port 3030"
   },
   "devDependencies": {
-    "typescript": "^5.5.0",
-    "@types/bun": "^1.1.0"
+    "@types/bun": "^1.1.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^5.5.0"
   },
   "dependencies": {
+    "next": "15.5.0",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
     "yaml": "^2.9.0",
     "zod": "^4.4.3"
   }
