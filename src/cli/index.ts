@@ -8,6 +8,9 @@ import {
   newFlowId,
   writeState,
 } from "../runtime/state.ts";
+import { plan, PlannerError } from "../runtime/planner.ts";
+import { writeContractYaml } from "../runtime/contract-io.ts";
+import type { AgentBackend } from "../adapters/backend.ts";
 
 const HELP = `gflow — orchestration system for coding agents
 
@@ -20,9 +23,17 @@ Usage:
 Environment:
   GFLOW_TARGET_DIR       Worker sandbox dir (default: ../demo-target)
   GFLOW_ROOT             Runtime artifact root (default: ./.gflow)
+  GFLOW_BACKEND          planner/worker backend: claude-code (default) | none
+  GFLOW_CLAUDE_BIN       path to claude CLI (default: "claude")
 `;
 
-export async function cmdStart(goal: string): Promise<number> {
+export interface CmdStartOptions {
+  backend?: AgentBackend | null;
+  runPlanner?: boolean;
+  clarifications?: string;
+}
+
+export async function cmdStart(goal: string, options: CmdStartOptions = {}): Promise<number> {
   if (!goal || goal.trim() === "") {
     console.error('gflow: "start" requires a non-empty goal');
     console.error('Usage: gflow start "<goal>"');
@@ -36,7 +47,42 @@ export async function cmdStart(goal: string): Promise<number> {
   console.log(`gflow: created flow ${flowId}`);
   console.log(`       goal:  ${goal}`);
   console.log(`       dir:   ${flowDir(flowId)}`);
-  console.log(`       phase: planning (Planner runs in M3)`);
+
+  if (options.runPlanner !== false && options.backend) {
+    console.log(`       planner: invoking ${options.backend.name}…`);
+    try {
+      const { contract } = await plan({
+        flow_id: flowId,
+        goal,
+        clarifications: options.clarifications,
+        cwd: flowDir(flowId),
+        backend: options.backend,
+      });
+      const contractPath = join(flowDir(flowId), "contract.yaml");
+      await writeContractYaml(contract, contractPath);
+      const featureCount = contract.milestones.reduce((s, m) => s + m.features.length, 0);
+      const assertionCount = contract.milestones.reduce(
+        (s, m) => s + m.features.reduce((t, f) => t + f.assertions.length, 0),
+        0,
+      );
+      console.log(
+        `       contract: ${contract.milestones.length} milestones / ${featureCount} features / ${assertionCount} assertions`,
+      );
+      console.log(`       written: ${contractPath}`);
+      console.log(`       phase: planning (review contract, then \`gflow resume\`)`);
+      return 0;
+    } catch (err) {
+      if (err instanceof PlannerError) {
+        console.error(`gflow: planner failed self-check (G1)`);
+        console.error(`       ${err.message}`);
+        for (const issue of err.issues) console.error(`       - ${issue}`);
+        return 1;
+      }
+      throw err;
+    }
+  } else {
+    console.log(`       phase: planning (no backend wired; supply --backend or set GFLOW_BACKEND)`);
+  }
   return 0;
 }
 
@@ -75,12 +121,30 @@ export async function cmdResume(): Promise<number> {
   return 0;
 }
 
+async function defaultBackend(): Promise<AgentBackend | null> {
+  const choice = (process.env.GFLOW_BACKEND ?? "claude-code").toLowerCase();
+  if (choice === "none" || choice === "off") return null;
+  if (choice === "claude-code") {
+    const { ClaudeCodeBackend } = await import("../adapters/claude-code.ts");
+    return new ClaudeCodeBackend();
+  }
+  if (choice === "opencloud") {
+    const { OpenCloudBackend } = await import("../adapters/opencloud.ts");
+    return new OpenCloudBackend();
+  }
+  console.error(`gflow: unknown GFLOW_BACKEND="${choice}", defaulting to none`);
+  return null;
+}
+
 export async function main(argv: string[]): Promise<number> {
   const cmd = argv[0];
 
   switch (cmd) {
-    case "start":
-      return cmdStart(argv.slice(1).join(" "));
+    case "start": {
+      const goal = argv.slice(1).join(" ");
+      const backend = await defaultBackend();
+      return cmdStart(goal, { backend, runPlanner: backend !== null });
+    }
     case "status":
       return cmdStatus();
     case "resume":
