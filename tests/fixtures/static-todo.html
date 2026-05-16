@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Todos</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px; }
+    h1 { font-size: 18px; letter-spacing: 0.05em; text-transform: uppercase; }
+    .row { display: flex; gap: 8px; margin-bottom: 16px; }
+    .row input { flex: 1; padding: 8px; border: 1px solid #ccc; border-radius: 4px; }
+    .row button { padding: 8px 14px; border: 0; border-radius: 4px; background: #111; color: white; cursor: pointer; }
+    ul { list-style: none; padding: 0; }
+    li { padding: 8px; border-bottom: 1px solid #eee; }
+    li:last-child { border-bottom: none; }
+  </style>
+</head>
+<body>
+  <h1>Todos</h1>
+  <div class="row">
+    <input id="todo-input" type="text" placeholder="What needs doing?" autocomplete="off">
+    <button id="add-todo">Add Todo</button>
+  </div>
+  <ul id="todo-list"></ul>
+  <script>
+    (function () {
+      var input = document.getElementById('todo-input');
+      var button = document.getElementById('add-todo');
+      var list = document.getElementById('todo-list');
+
+      function addTodo() {
+        var text = input.value.trim();
+        if (!text) return;
+        var li = document.createElement('li');
+        li.textContent = text;
+        list.appendChild(li);
+        input.value = '';
+        input.focus();
+      }
+
+      button.addEventListener('click', addTodo);
+      input.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') addTodo();
+      });
+    })();
+  </script>
+</body>
+</html>
