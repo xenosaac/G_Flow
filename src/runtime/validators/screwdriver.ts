@@ -1,11 +1,13 @@
 import { writeFile, mkdir, rename, stat } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import { join, dirname } from "node:path";
-import type { FeatureT } from "../../artifacts/contract.ts";
+import type { AssertionT, FeatureT } from "../../artifacts/contract.ts";
 import {
   ValidatorReport,
   type ValidatorReportT,
   type AssertionResultT,
 } from "../../artifacts/reports.ts";
+import { runCheck } from "./checks.ts";
 
 const SCREWDRIVER_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -13,9 +15,9 @@ export interface RunScrewdriverInput {
   flow_id: string;
   feature: FeatureT;
   target_dir: string;
-  /** Test hook: override timeout. */
+  /** Test hook: override per-process timeout. */
   timeoutMs?: number;
-  /** Test hook: inject a fake `runProjectChecks` impl. */
+  /** Test hook: inject a fake project-wide checker (legacy fallback path). */
   runner?: ProjectChecker;
 }
 
@@ -25,6 +27,8 @@ export interface ProjectCheckResult {
   stdoutTail: string;
   stderrTail: string;
   timedOut: boolean;
+  /** True when the check actually ran; false when skipped (no test script / no tsconfig). */
+  applicable?: boolean;
 }
 
 export type ProjectChecker = (
@@ -32,7 +36,20 @@ export type ProjectChecker = (
   timeoutMs: number,
 ) => Promise<ProjectCheckResult[]>;
 
-/** Run mechanical checks (test, typecheck) and produce a ValidatorReport. */
+/**
+ * Mechanical validator. Two paths:
+ *
+ *  1) Per-assertion: when an assertion declares `check`, run it directly.
+ *     One assertion result per assertion. Static HTML projects without any
+ *     test scaffolding pass cleanly via file_exists / file_contains.
+ *
+ *  2) Legacy fallback: assertions without `check` get marked by a project-
+ *     wide `bun test` + `tsc --noEmit`. If neither is applicable (no test
+ *     script in package.json, no tsconfig.json), uncovered assertions get
+ *     benefit of doubt — pass with a detail noting the gap. This avoids the
+ *     pre-fix bug where every screwdriver assertion was marked fail just
+ *     because `bun test` exited nonzero on an empty project.
+ */
 export async function runScrewdriver(
   input: RunScrewdriverInput,
 ): Promise<ValidatorReportT> {
@@ -43,34 +60,74 @@ export async function runScrewdriver(
     (a) => a.validator === "screwdriver",
   );
 
-  const checks = await runner(input.target_dir, timeoutMs);
-  const allPass = checks.every((c) => c.exitCode === 0 && !c.timedOut);
-  const stdoutTail = checks
-    .map((c) => `$ ${c.cmd} (exit=${c.exitCode})\n${c.stdoutTail}`)
-    .join("\n\n");
-  const stderrTail = checks
-    .map((c) => `$ ${c.cmd} stderr\n${c.stderrTail}`)
-    .filter((s) => s.trim().length > "$  stderr".length)
-    .join("\n\n");
+  const checked: AssertionResultT[] = [];
+  const unchecked: AssertionT[] = [];
 
-  const status = allPass ? "pass" : "fail";
-  const results: AssertionResultT[] = screwdriverAssertions.map((a) => ({
-    assertion_id: a.id,
-    outcome: allPass ? "pass" : "fail",
-    detail: allPass
-      ? "all project checks passed"
-      : `at least one check failed: ${checks
-          .filter((c) => c.exitCode !== 0 || c.timedOut)
-          .map((c) => `${c.cmd}@${c.exitCode ?? "killed"}`)
-          .join(", ")}`,
-  }));
+  for (const a of screwdriverAssertions) {
+    if (a.check) {
+      const r = await runCheck(input.target_dir, a.check);
+      checked.push({
+        assertion_id: a.id,
+        outcome: r.ok ? "pass" : "fail",
+        detail: r.detail,
+      });
+    } else {
+      unchecked.push(a);
+    }
+  }
+
+  let legacy: ProjectCheckResult[] = [];
+  let stdoutTail = "";
+  let stderrTail = "";
+  const legacyResults: AssertionResultT[] = [];
+
+  if (unchecked.length > 0) {
+    legacy = await runner(input.target_dir, timeoutMs);
+    stdoutTail = legacy
+      .map((c) => `$ ${c.cmd} (exit=${c.exitCode}${c.applicable === false ? ", SKIPPED" : ""})\n${c.stdoutTail}`)
+      .join("\n\n");
+    stderrTail = legacy
+      .filter(
+        (c) =>
+          c.applicable !== false &&
+          c.stderrTail &&
+          c.stderrTail.trim().length > 0,
+      )
+      .map((c) => `$ ${c.cmd} stderr\n${c.stderrTail}`)
+      .join("\n\n");
+
+    const applicable = legacy.filter((c) => c.applicable !== false);
+    const allPassed =
+      applicable.length === 0
+        ? true
+        : applicable.every((c) => c.exitCode === 0 && !c.timedOut);
+
+    for (const a of unchecked) {
+      legacyResults.push({
+        assertion_id: a.id,
+        outcome: allPassed ? "pass" : "fail",
+        detail:
+          applicable.length === 0
+            ? "no project tests / tsc applicable; assertion has no explicit `check` — passing on benefit of doubt"
+            : allPassed
+              ? "all project checks passed"
+              : `at least one project check failed: ${applicable
+                  .filter((c) => c.exitCode !== 0 || c.timedOut)
+                  .map((c) => `${c.cmd}@${c.exitCode ?? "killed"}`)
+                  .join(", ")}`,
+      });
+    }
+  }
+
+  const all = [...checked, ...legacyResults];
+  const anyFail = all.some((r) => r.outcome === "fail");
 
   return ValidatorReport.parse({
     feature_id: input.feature.id,
     flow_id: input.flow_id,
     validator: "screwdriver",
-    status,
-    assertion_results: results,
+    status: anyFail ? "fail" : "pass",
+    assertion_results: all,
     raw_stdout_tail: truncate(stdoutTail, 4000),
     raw_stderr_tail: truncate(stderrTail, 4000),
     recorded_at: new Date().toISOString(),
@@ -78,7 +135,7 @@ export async function runScrewdriver(
   });
 }
 
-/** Default checker: `bun test` and `bun x tsc --noEmit`, run in `target_dir`. */
+/** Detects test scaffolding before running. Skipped sub-checks return applicable=false. */
 async function defaultProjectChecks(
   target_dir: string,
   timeoutMs: number,
@@ -92,13 +149,51 @@ async function defaultProjectChecks(
         stdoutTail: "",
         stderrTail: `screwdriver: target_dir does not exist`,
         timedOut: false,
+        applicable: true,
       },
     ];
   }
   const out: ProjectCheckResult[] = [];
-  out.push(await runOne(["bun", "test"], target_dir, timeoutMs));
-  out.push(await runOne(["bun", "x", "tsc", "--noEmit"], target_dir, timeoutMs));
+
+  const hasTest = await hasTestScript(target_dir);
+  if (hasTest) {
+    out.push(await runOne(["bun", "test"], target_dir, timeoutMs));
+  } else {
+    out.push({
+      cmd: "bun test",
+      exitCode: 0,
+      stdoutTail: "skipped: no `test` script in package.json (or no package.json)",
+      stderrTail: "",
+      timedOut: false,
+      applicable: false,
+    });
+  }
+
+  const hasTsc = await fileExists(join(target_dir, "tsconfig.json"));
+  if (hasTsc) {
+    out.push(await runOne(["bun", "x", "tsc", "--noEmit"], target_dir, timeoutMs));
+  } else {
+    out.push({
+      cmd: "bun x tsc --noEmit",
+      exitCode: 0,
+      stdoutTail: "skipped: no tsconfig.json in target_dir",
+      stderrTail: "",
+      timedOut: false,
+      applicable: false,
+    });
+  }
   return out;
+}
+
+async function hasTestScript(target_dir: string): Promise<boolean> {
+  try {
+    const pkgPath = join(target_dir, "package.json");
+    const raw = await Bun.file(pkgPath).text();
+    const pkg = JSON.parse(raw);
+    return Boolean(pkg && pkg.scripts && typeof pkg.scripts.test === "string");
+  } catch {
+    return false;
+  }
 }
 
 async function runOne(
@@ -130,6 +225,7 @@ async function runOne(
       stdoutTail: tailOf(stdout, 1200),
       stderrTail: tailOf(stderr, 1200),
       timedOut,
+      applicable: true,
     };
   } catch (err) {
     return {
@@ -138,9 +234,19 @@ async function runOne(
       stdoutTail: "",
       stderrTail: err instanceof Error ? err.message : String(err),
       timedOut,
+      applicable: true,
     };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+async function fileExists(p: string): Promise<boolean> {
+  try {
+    await access(p);
+    return true;
+  } catch {
+    return false;
   }
 }
 
