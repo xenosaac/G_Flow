@@ -2,6 +2,7 @@ import type { AgentBackend, AgentRunRequest, AgentRunResult } from "./backend.ts
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readFile, unlink } from "node:fs/promises";
+import { spawnPiped } from "./spawn.ts";
 
 /**
  * CodexBackend — shells out to the `codex` CLI in headless exec mode.
@@ -44,61 +45,33 @@ export class CodexBackend implements AgentBackend {
       lastMsgPath,
       "-",
     ];
-    const controller = new AbortController();
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      controller.abort();
-    }, req.timeoutMs);
+    const result = await spawnPiped([binary, ...args], {
+      cwd: req.cwd,
+      env: { ...process.env, ...(req.env ?? {}) },
+      timeoutMs: req.timeoutMs,
+      stdin: req.prompt,
+    });
 
+    let cleanOut = "";
     try {
-      const proc = Bun.spawn([binary, ...args], {
-        cwd: req.cwd,
-        env: { ...process.env, ...(req.env ?? {}) },
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-        signal: controller.signal,
-      });
-
-      proc.stdin.write(req.prompt);
-      proc.stdin.end();
-
-      const [verboseStdout, stderr] = await Promise.all([
-        new Response(proc.stdout).text(),
-        new Response(proc.stderr).text(),
-      ]);
-      const exitCode = await proc.exited;
-
-      let cleanOut = "";
-      try {
-        cleanOut = await readFile(lastMsgPath, "utf8");
-      } catch {
-        // If -o never wrote (e.g., crash before completion), fall back to
-        // the verbose stdout. Planner/Steward parsers may still recover.
-        cleanOut = verboseStdout;
-      }
-      // best-effort cleanup
-      await unlink(lastMsgPath).catch(() => undefined);
-
-      return {
-        ok: !timedOut && exitCode === 0,
-        exitCode: timedOut ? null : exitCode,
-        stdout: cleanOut,
-        stderr: stderr + (verboseStdout && cleanOut !== verboseStdout ? `\n--- codex verbose stdout ---\n${verboseStdout}` : ""),
-        timedOut,
-      };
-    } catch (err) {
-      await unlink(lastMsgPath).catch(() => undefined);
-      return {
-        ok: false,
-        exitCode: null,
-        stdout: "",
-        stderr: err instanceof Error ? err.message : String(err),
-        timedOut,
-      };
-    } finally {
-      clearTimeout(timer);
+      cleanOut = await readFile(lastMsgPath, "utf8");
+    } catch {
+      // If -o never wrote (e.g., crash before completion), fall back to the
+      // verbose stdout. Planner/Steward parsers may still recover.
+      cleanOut = result.stdout;
     }
+    await unlink(lastMsgPath).catch(() => undefined);
+
+    return {
+      ok: result.ok,
+      exitCode: result.exitCode,
+      stdout: cleanOut,
+      stderr:
+        result.stderr +
+        (result.stdout && cleanOut !== result.stdout
+          ? `\n--- codex verbose stdout ---\n${result.stdout}`
+          : ""),
+      timedOut: result.timedOut,
+    };
   }
 }
