@@ -3,10 +3,10 @@
 import { useEffect, useState } from "react";
 import type { FlowSnapshot } from "../lib/snapshot.ts";
 import NeedsHumanBanner from "./NeedsHumanBanner";
-import FlowStatus from "./FlowStatus";
 import FeatureList from "./FeatureList";
 import ValidatorPanel from "./ValidatorPanel";
 import AgentWorkbench from "./AgentWorkbench";
+import GBrainDashboard from "./GBrainDashboard";
 
 type ConnState = "connecting" | "live" | "idle" | "error";
 
@@ -46,30 +46,36 @@ export default function ConsoleClient({
       <header className="header">
         <h1>G_FLOW CONSOLE</h1>
         <div className="meta">
-          local-first orchestration for any coding agent · SSE @ /api/stream
+          local-first orchestration · plan mode by default · SSE @ /api/stream
         </div>
       </header>
 
-      <AgentWorkbench snapshot={snapshot} />
-
-      {snapshot ? (
-        <>
-          <NeedsHumanBanner snapshot={snapshot} />
-          <FlowStatus snapshot={snapshot} />
-          <FeatureList snapshot={snapshot} />
+      <div className="layout">
+        <aside className="col-left">
+          {snapshot?.state.phase === "needs_human" ? (
+            <NeedsHumanBanner snapshot={snapshot} />
+          ) : null}
           <ValidatorPanel snapshot={snapshot} />
-        </>
-      ) : (
-        <section className="panel">
-          <h2>No flow yet</h2>
-          <div className="empty">
-            Type <code>/start &lt;goal&gt;</code> in the Workbench above, or run <code>gflow start &quot;&lt;goal&gt;&quot;</code> in this directory.
-          </div>
+        </aside>
+
+        <section className="col-center">
+          <AgentWorkbench snapshot={snapshot} />
+          <GBrainDashboard snapshot={snapshot} />
         </section>
-      )}
+
+        <aside className="col-right">
+          <FeatureList snapshot={snapshot} />
+        </aside>
+      </div>
 
       <div className={`connection-indicator ${conn}`} data-testid="conn-indicator">
-        {conn === "live" ? "● live" : conn === "connecting" ? "○ connecting" : conn === "idle" ? "○ idle" : "● error"}
+        {conn === "live"
+          ? "● live"
+          : conn === "connecting"
+            ? "○ connecting"
+            : conn === "idle"
+              ? "○ idle"
+              : "● error"}
       </div>
     </main>
   );
