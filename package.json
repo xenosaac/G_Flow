@@ -1,0 +1,18 @@
+{
+  "name": "gflow",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Open-source orchestration system for coding agents (G_Flow Hackathon V1)",
+  "bin": {
+    "gflow": "./bin/gflow"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/bun": "^1.1.0"
+  }
+}
