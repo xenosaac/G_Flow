@@ -26,8 +26,9 @@ Environment:
   GFLOW_TARGET_DIR       Worker sandbox dir (default: ../demo-target)
   GFLOW_TARGET_URL       URL for user-test validator (default: http://localhost:3000)
   GFLOW_ROOT             Runtime artifact root (default: ./.gflow)
-  GFLOW_BACKEND          planner/worker backend: claude-code (default) | none
+  GFLOW_BACKEND          planner/worker backend: claude-code (default) | codex | opencloud | none
   GFLOW_CLAUDE_BIN       path to claude CLI (default: "claude")
+  GFLOW_CODEX_BIN        path to codex CLI (default: "codex")
 `;
 
 export interface CmdStartOptions {
@@ -172,19 +173,38 @@ async function fileExists(p: string): Promise<boolean> {
   }
 }
 
-async function defaultBackend(): Promise<AgentBackend | null> {
+export class UnknownBackendError extends Error {
+  constructor(public readonly value: string) {
+    super(
+      `Unknown GFLOW_BACKEND="${value}". Expected one of: claude-code, codex, opencloud, none.`,
+    );
+    this.name = "UnknownBackendError";
+  }
+}
+
+export const KNOWN_BACKENDS = ["claude-code", "codex", "opencloud", "none"] as const;
+export type KnownBackend = (typeof KNOWN_BACKENDS)[number];
+
+/**
+ * Resolve the configured backend. Unknown values now THROW (no silent fall
+ * back to none) so misconfigured environments are loud, not silent.
+ */
+export async function defaultBackend(): Promise<AgentBackend | null> {
   const choice = (process.env.GFLOW_BACKEND ?? "claude-code").toLowerCase();
   if (choice === "none" || choice === "off") return null;
   if (choice === "claude-code") {
     const { ClaudeCodeBackend } = await import("../adapters/claude-code.ts");
     return new ClaudeCodeBackend();
   }
+  if (choice === "codex") {
+    const { CodexBackend } = await import("../adapters/codex.ts");
+    return new CodexBackend();
+  }
   if (choice === "opencloud") {
     const { OpenCloudBackend } = await import("../adapters/opencloud.ts");
     return new OpenCloudBackend();
   }
-  console.error(`gflow: unknown GFLOW_BACKEND="${choice}", defaulting to none`);
-  return null;
+  throw new UnknownBackendError(choice);
 }
 
 export async function main(argv: string[]): Promise<number> {
@@ -193,15 +213,44 @@ export async function main(argv: string[]): Promise<number> {
   switch (cmd) {
     case "start": {
       const goal = argv.slice(1).join(" ");
-      const backend = await defaultBackend();
+      let backend: AgentBackend | null;
+      try {
+        backend = await defaultBackend();
+      } catch (err) {
+        if (err instanceof UnknownBackendError) {
+          console.error(`gflow: ${err.message}`);
+          return 64;
+        }
+        throw err;
+      }
       return cmdStart(goal, { backend, runPlanner: backend !== null });
     }
     case "status":
       return cmdStatus();
-    case "resume":
-      return cmdResume();
+    case "resume": {
+      let backend: AgentBackend | null;
+      try {
+        backend = await defaultBackend();
+      } catch (err) {
+        if (err instanceof UnknownBackendError) {
+          console.error(`gflow: ${err.message}`);
+          return 64;
+        }
+        throw err;
+      }
+      return cmdResume({ backend });
+    }
     case "approve": {
-      const backend = await defaultBackend();
+      let backend: AgentBackend | null;
+      try {
+        backend = await defaultBackend();
+      } catch (err) {
+        if (err instanceof UnknownBackendError) {
+          console.error(`gflow: ${err.message}`);
+          return 64;
+        }
+        throw err;
+      }
       return cmdResume({ backend });
     }
     case undefined:
