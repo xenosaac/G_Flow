@@ -1,6 +1,7 @@
 import { writeFile, mkdir, rename } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnPiped } from "../../adapters/spawn.ts";
 import type { FeatureT } from "../../artifacts/contract.ts";
 import {
   ValidatorReport,
@@ -189,43 +190,17 @@ async function defaultSubprocessRunner(
   spec: UserTestSpec,
   ctx: { python: string; script: string; cwd: string; timeoutMs: number },
 ): Promise<SubprocessOutcome> {
-  const controller = new AbortController();
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, ctx.timeoutMs);
-  try {
-    const proc = Bun.spawn([ctx.python, ctx.script], {
-      cwd: ctx.cwd,
-      stdin: "pipe",
-      stdout: "pipe",
-      stderr: "pipe",
-      signal: controller.signal,
-    });
-    proc.stdin.write(JSON.stringify(spec));
-    proc.stdin.end();
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const exitCode = await proc.exited;
-    return {
-      exitCode: timedOut ? null : exitCode,
-      stdout,
-      stderr,
-      timedOut,
-    };
-  } catch (err) {
-    return {
-      exitCode: null,
-      stdout: "",
-      stderr: err instanceof Error ? err.message : String(err),
-      timedOut,
-    };
-  } finally {
-    clearTimeout(timer);
-  }
+  const r = await spawnPiped([ctx.python, ctx.script], {
+    cwd: ctx.cwd,
+    timeoutMs: ctx.timeoutMs,
+    stdin: JSON.stringify(spec),
+  });
+  return {
+    exitCode: r.exitCode,
+    stdout: r.stdout,
+    stderr: r.stderr,
+    timedOut: r.timedOut,
+  };
 }
 
 function defaultScriptPath(): string {

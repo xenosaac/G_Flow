@@ -1,6 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { AssertionCheckT } from "../../artifacts/contract.ts";
+import { spawnPiped } from "../../adapters/spawn.ts";
 
 export interface CheckOutcome {
   ok: boolean;
@@ -75,56 +76,37 @@ async function runCommand(
   timeoutMs: number,
 ): Promise<CheckOutcome> {
   if (cmd.length === 0) return { ok: false, detail: "empty cmd array" };
-  const controller = new AbortController();
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutMs);
-  try {
-    const proc = Bun.spawn(cmd, {
-      cwd: target_dir,
-      stdout: "pipe",
-      stderr: "pipe",
-      signal: controller.signal,
-    });
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const exitCode = await proc.exited;
-    if (timedOut) {
-      return {
-        ok: false,
-        detail: `${cmd.join(" ")} timed out after ${timeoutMs}ms`,
-      };
-    }
-    if (exitCode === expectedExit && (!stdoutIncludes || stdout.includes(stdoutIncludes))) {
-      return {
-        ok: true,
-        detail: stdoutIncludes
-          ? `${cmd.join(" ")} → exit=${exitCode}; stdout contains "${truncate(stdoutIncludes, 60)}"`
-          : `${cmd.join(" ")} → exit=${exitCode}`,
-      };
-    }
-    if (exitCode === expectedExit && stdoutIncludes && !stdout.includes(stdoutIncludes)) {
-      return {
-        ok: false,
-        detail: `${cmd.join(" ")} → exit=${exitCode}; stdout does NOT contain "${truncate(stdoutIncludes, 60)}"; stdout=${tail(stdout, 200)}; stderr=${tail(stderr, 200)}`,
-      };
-    }
+  const r = await spawnPiped(cmd, { cwd: target_dir, timeoutMs });
+  if (r.timedOut) {
     return {
       ok: false,
-      detail: `${cmd.join(" ")} → exit=${exitCode} (expected ${expectedExit}); stdout=${tail(stdout, 200)}; stderr=${tail(stderr, 200)}`,
+      detail: `${cmd.join(" ")} timed out after ${timeoutMs}ms`,
     };
-  } catch (err) {
-    return {
-      ok: false,
-      detail: `spawn ${cmd.join(" ")} threw: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  } finally {
-    clearTimeout(timer);
   }
+  if (r.exitCode === null) {
+    return {
+      ok: false,
+      detail: `spawn ${cmd.join(" ")} threw: ${tail(r.stderr, 200)}`,
+    };
+  }
+  if (r.exitCode === expectedExit && (!stdoutIncludes || r.stdout.includes(stdoutIncludes))) {
+    return {
+      ok: true,
+      detail: stdoutIncludes
+        ? `${cmd.join(" ")} → exit=${r.exitCode}; stdout contains "${truncate(stdoutIncludes, 60)}"`
+        : `${cmd.join(" ")} → exit=${r.exitCode}`,
+    };
+  }
+  if (r.exitCode === expectedExit && stdoutIncludes && !r.stdout.includes(stdoutIncludes)) {
+    return {
+      ok: false,
+      detail: `${cmd.join(" ")} → exit=${r.exitCode}; stdout does NOT contain "${truncate(stdoutIncludes, 60)}"; stdout=${tail(r.stdout, 200)}; stderr=${tail(r.stderr, 200)}`,
+    };
+  }
+  return {
+    ok: false,
+    detail: `${cmd.join(" ")} → exit=${r.exitCode} (expected ${expectedExit}); stdout=${tail(r.stdout, 200)}; stderr=${tail(r.stderr, 200)}`,
+  };
 }
 
 function resolveInside(root: string, p: string): string | null {

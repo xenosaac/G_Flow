@@ -1,7 +1,8 @@
-import { writeFile, mkdir, rename, stat } from "node:fs/promises";
+import { writeFile, mkdir, rename, stat, readFile } from "node:fs/promises";
 import { access } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import type { AssertionT, FeatureT } from "../../artifacts/contract.ts";
+import { spawnPiped } from "../../adapters/spawn.ts";
 import {
   ValidatorReport,
   type ValidatorReportT,
@@ -188,7 +189,7 @@ async function defaultProjectChecks(
 async function hasTestScript(target_dir: string): Promise<boolean> {
   try {
     const pkgPath = join(target_dir, "package.json");
-    const raw = await Bun.file(pkgPath).text();
+    const raw = await readFile(pkgPath, "utf8");
     const pkg = JSON.parse(raw);
     return Boolean(pkg && pkg.scripts && typeof pkg.scripts.test === "string");
   } catch {
@@ -201,44 +202,15 @@ async function runOne(
   cwd: string,
   timeoutMs: number,
 ): Promise<ProjectCheckResult> {
-  const controller = new AbortController();
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, timeoutMs);
-  try {
-    const proc = Bun.spawn(argv, {
-      cwd,
-      stdout: "pipe",
-      stderr: "pipe",
-      signal: controller.signal,
-    });
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const exitCode = await proc.exited;
-    return {
-      cmd: argv.join(" "),
-      exitCode: timedOut ? null : exitCode,
-      stdoutTail: tailOf(stdout, 1200),
-      stderrTail: tailOf(stderr, 1200),
-      timedOut,
-      applicable: true,
-    };
-  } catch (err) {
-    return {
-      cmd: argv.join(" "),
-      exitCode: null,
-      stdoutTail: "",
-      stderrTail: err instanceof Error ? err.message : String(err),
-      timedOut,
-      applicable: true,
-    };
-  } finally {
-    clearTimeout(timer);
-  }
+  const r = await spawnPiped(argv, { cwd, timeoutMs });
+  return {
+    cmd: argv.join(" "),
+    exitCode: r.exitCode,
+    stdoutTail: tailOf(r.stdout, 1200),
+    stderrTail: tailOf(r.stderr, 1200),
+    timedOut: r.timedOut,
+    applicable: true,
+  };
 }
 
 async function fileExists(p: string): Promise<boolean> {
