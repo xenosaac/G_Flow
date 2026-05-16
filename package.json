@@ -14,5 +14,9 @@
   "devDependencies": {
     "typescript": "^5.5.0",
     "@types/bun": "^1.1.0"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
   }
 }
