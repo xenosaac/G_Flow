@@ -364,8 +364,26 @@ describe("nextAction — triage routing", () => {
     });
     expect(action.type).toBe("corrective_worker");
     if (action.type === "corrective_worker") {
-      expect(action.attempt).toBe(3);
+      // 2 prior corrections done, original was attempt 1 → this is feature attempt 4
+      expect(action.attempt).toBe(4);
       expect(action.failures).toHaveLength(1);
+    }
+  });
+
+  test("triage=BROKEN_IMPL with corrective=0 → corrective_worker attempt=2", () => {
+    const action = nextAction({
+      state: makeState({
+        phase: "executing",
+        current_milestone: "M-001",
+        current_feature: "F-001",
+        current_step: "steward_triage",
+      }),
+      contract: makeContract(),
+      lastTriage: { classification: "BROKEN_IMPL" },
+    });
+    expect(action.type).toBe("corrective_worker");
+    if (action.type === "corrective_worker") {
+      expect(action.attempt).toBe(2); // original was attempt 1; first corrective is attempt 2
     }
   });
 

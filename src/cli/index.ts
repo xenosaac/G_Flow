@@ -1,4 +1,4 @@
-import { writeFile } from "node:fs/promises";
+import { writeFile, access } from "node:fs/promises";
 import { join } from "node:path";
 import {
   ensureFlowDir,
@@ -10,6 +10,7 @@ import {
 } from "../runtime/state.ts";
 import { plan, PlannerError } from "../runtime/planner.ts";
 import { writeContractYaml } from "../runtime/contract-io.ts";
+import { runFlow } from "../runtime/runner.ts";
 import type { AgentBackend } from "../adapters/backend.ts";
 
 const HELP = `gflow — orchestration system for coding agents
@@ -17,11 +18,13 @@ const HELP = `gflow — orchestration system for coding agents
 Usage:
   gflow start "<goal>"   Begin a new flow from a user goal
   gflow status           Show status of the latest flow
-  gflow resume           Resume the latest non-complete flow
+  gflow resume           Resume the latest non-complete flow (Phase 2 loop)
+  gflow approve          Alias for resume — explicit "I reviewed the contract"
   gflow help             Show this help
 
 Environment:
   GFLOW_TARGET_DIR       Worker sandbox dir (default: ../demo-target)
+  GFLOW_TARGET_URL       URL for user-test validator (default: http://localhost:3000)
   GFLOW_ROOT             Runtime artifact root (default: ./.gflow)
   GFLOW_BACKEND          planner/worker backend: claude-code (default) | none
   GFLOW_CLAUDE_BIN       path to claude CLI (default: "claude")
@@ -110,15 +113,63 @@ export async function cmdStatus(): Promise<number> {
   return 0;
 }
 
-export async function cmdResume(): Promise<number> {
+export interface CmdResumeOptions {
+  backend?: AgentBackend | null;
+}
+
+export async function cmdResume(options: CmdResumeOptions = {}): Promise<number> {
   const latest = await latestFlow((s) => s.phase !== "complete");
   if (!latest) {
     console.log("gflow: no resumable flow.");
     return 0;
   }
-  console.log(`gflow: resuming flow ${latest.flow_id} (phase=${latest.phase})`);
-  console.log("       runtime loop wires up in M4-M5; this is a no-op stub.");
-  return 0;
+  const contractPath = join(flowDir(latest.flow_id), "contract.yaml");
+  const hasContract = await fileExists(contractPath);
+  if (!hasContract) {
+    console.log(
+      `gflow: flow ${latest.flow_id} exists but contract.yaml is missing. Run \`gflow start "<goal>"\` with a configured backend.`,
+    );
+    return 0;
+  }
+  const backend =
+    options.backend === undefined ? await defaultBackend() : options.backend;
+  if (!backend) {
+    console.log(
+      `gflow: flow ${latest.flow_id} is ready to resume; set GFLOW_BACKEND=claude-code (or pass --backend) to drive Phase 2.`,
+    );
+    return 0;
+  }
+
+  const targetDir =
+    process.env.GFLOW_TARGET_DIR ?? join(process.cwd(), "..", "demo-target");
+  const targetUrl =
+    process.env.GFLOW_TARGET_URL ?? "http://localhost:3000";
+
+  console.log(`gflow: resuming ${latest.flow_id}`);
+  console.log(`       backend:    ${backend.name}`);
+  console.log(`       target_dir: ${targetDir}`);
+  console.log(`       target_url: ${targetUrl}`);
+
+  const r = await runFlow({
+    flow_id: latest.flow_id,
+    target_dir: targetDir,
+    target_url: targetUrl,
+    backend,
+    approve: true,
+  });
+  console.log(
+    `gflow: ${r.status}${r.reason ? ` — ${r.reason}` : ""} (${r.iterations} iterations)`,
+  );
+  return r.status === "needs_human" ? 1 : 0;
+}
+
+async function fileExists(p: string): Promise<boolean> {
+  try {
+    await access(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function defaultBackend(): Promise<AgentBackend | null> {
@@ -149,6 +200,10 @@ export async function main(argv: string[]): Promise<number> {
       return cmdStatus();
     case "resume":
       return cmdResume();
+    case "approve": {
+      const backend = await defaultBackend();
+      return cmdResume({ backend });
+    }
     case undefined:
     case "help":
     case "--help":

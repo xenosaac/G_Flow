@@ -208,12 +208,16 @@ export function nextAction(input: NextActionInput): Action {
           input.lastScrewdriver,
           input.lastUserTest,
         );
+        // attempt = feature_attempt_number for the NEW corrective worker run.
+        // original = 1; first corrective = 2; Nth corrective = N + 1.
+        // corrective_attempts is incremented AFTER the worker runs, so this
+        // call sees the pre-increment count: attempt = corrective + 2.
         return {
           type: "corrective_worker",
           feature,
           milestone_id: milestone.id,
           failures,
-          attempt: corrective + 1,
+          attempt: corrective + 2,
         };
       }
       case "MISSING_ASSERTION":
