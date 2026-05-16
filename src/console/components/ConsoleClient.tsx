@@ -6,6 +6,7 @@ import NeedsHumanBanner from "./NeedsHumanBanner";
 import FlowStatus from "./FlowStatus";
 import FeatureList from "./FeatureList";
 import ValidatorPanel from "./ValidatorPanel";
+import AgentWorkbench from "./AgentWorkbench";
 
 type ConnState = "connecting" | "live" | "idle" | "error";
 
@@ -49,6 +50,8 @@ export default function ConsoleClient({
         </div>
       </header>
 
+      <AgentWorkbench />
+
       {snapshot ? (
         <>
           <NeedsHumanBanner snapshot={snapshot} />
@@ -60,7 +63,7 @@ export default function ConsoleClient({
         <section className="panel">
           <h2>No flow yet</h2>
           <div className="empty">
-            Run <code>gflow start &quot;&lt;goal&gt;&quot;</code> in this directory.
+            Type a goal in the Workbench above and press <strong>Start Flow</strong>, or run <code>gflow start &quot;&lt;goal&gt;&quot;</code> in this directory.
           </div>
         </section>
       )}

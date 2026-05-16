@@ -1,4 +1,4 @@
-export type AgentRole = "planner" | "worker" | "steward";
+export type AgentRole = "planner" | "worker" | "steward" | "chat";
 
 export type AgentRunRequest = {
   role: AgentRole;

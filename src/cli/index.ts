@@ -11,6 +11,10 @@ import {
 import { plan, PlannerError } from "../runtime/planner.ts";
 import { writeContractYaml } from "../runtime/contract-io.ts";
 import { runFlow } from "../runtime/runner.ts";
+import {
+  defaultBackend,
+  UnknownBackendError,
+} from "../adapters/select.ts";
 import type { AgentBackend } from "../adapters/backend.ts";
 
 const HELP = `gflow — orchestration system for coding agents
@@ -173,39 +177,13 @@ async function fileExists(p: string): Promise<boolean> {
   }
 }
 
-export class UnknownBackendError extends Error {
-  constructor(public readonly value: string) {
-    super(
-      `Unknown GFLOW_BACKEND="${value}". Expected one of: claude-code, codex, opencloud, none.`,
-    );
-    this.name = "UnknownBackendError";
-  }
-}
-
-export const KNOWN_BACKENDS = ["claude-code", "codex", "opencloud", "none"] as const;
-export type KnownBackend = (typeof KNOWN_BACKENDS)[number];
-
-/**
- * Resolve the configured backend. Unknown values now THROW (no silent fall
- * back to none) so misconfigured environments are loud, not silent.
- */
-export async function defaultBackend(): Promise<AgentBackend | null> {
-  const choice = (process.env.GFLOW_BACKEND ?? "claude-code").toLowerCase();
-  if (choice === "none" || choice === "off") return null;
-  if (choice === "claude-code") {
-    const { ClaudeCodeBackend } = await import("../adapters/claude-code.ts");
-    return new ClaudeCodeBackend();
-  }
-  if (choice === "codex") {
-    const { CodexBackend } = await import("../adapters/codex.ts");
-    return new CodexBackend();
-  }
-  if (choice === "opencloud") {
-    const { OpenCloudBackend } = await import("../adapters/opencloud.ts");
-    return new OpenCloudBackend();
-  }
-  throw new UnknownBackendError(choice);
-}
+export {
+  UnknownBackendError,
+  KNOWN_BACKENDS,
+  defaultBackend,
+  selectBackend,
+  type KnownBackend,
+} from "../adapters/select.ts";
 
 export async function main(argv: string[]): Promise<number> {
   const cmd = argv[0];
