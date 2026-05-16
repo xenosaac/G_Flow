@@ -5,9 +5,10 @@ import type { AgentBackend } from "../adapters/backend.ts";
 import { gflowRoot } from "./state.ts";
 
 export const ChatMessage = z.object({
-  role: z.enum(["user", "agent"]),
+  role: z.enum(["user", "assistant", "system"]),
   content: z.string(),
-  ts: z.string(),
+  backend: z.string().min(1),
+  recorded_at: z.string(),
   ok: z.boolean().optional(),
   exit_code: z.number().int().nullable().optional(),
 });
@@ -115,7 +116,8 @@ export async function sendChat(input: SendChatInput): Promise<SendChatResult> {
   transcript.messages.push({
     role: "user",
     content: input.message,
-    ts: now,
+    backend: input.backend.name,
+    recorded_at: now,
   });
   await writeTranscript(transcript, root);
 
@@ -132,9 +134,10 @@ export async function sendChat(input: SendChatInput): Promise<SendChatResult> {
       `(no output; exit=${result.exitCode}, timedOut=${result.timedOut})`;
 
   transcript.messages.push({
-    role: "agent",
+    role: "assistant",
     content: reply,
-    ts: new Date().toISOString(),
+    backend: input.backend.name,
+    recorded_at: new Date().toISOString(),
     ok: result.ok,
     exit_code: result.exitCode,
   });

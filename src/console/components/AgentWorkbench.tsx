@@ -9,9 +9,9 @@ interface BackendInfo {
 }
 
 interface TranscriptEntry {
-  role: "user" | "agent";
+  role: "user" | "assistant";
   content: string;
-  ts: string;
+  recorded_at: string;
   ok?: boolean;
 }
 
@@ -61,8 +61,8 @@ export default function AgentWorkbench() {
       const now = new Date().toISOString();
       setTranscript((prev) => [
         ...prev,
-        { role: "user", content: message, ts: now },
-        { role: "agent", content: data.reply ?? "", ts: now, ok: data.ok },
+        { role: "user", content: message, recorded_at: now },
+        { role: "assistant", content: data.reply ?? "", recorded_at: now, ok: data.ok },
       ]);
       setMessage("");
     } catch (e) {

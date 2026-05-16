@@ -17,6 +17,9 @@ export interface BackendInfo {
 }
 
 export function listBackends(): BackendInfo[] {
+  // OpenCloud is a V1 stub (throws on any call). Hiding from the UI so the
+  // operator can't pick it by accident. The runtime adapter still exists for
+  // tests + future wiring (TODOS T1).
   return [
     {
       name: "claude-code",
@@ -27,11 +30,6 @@ export function listBackends(): BackendInfo[] {
       name: "codex",
       available: isBinaryAvailable("codex"),
       note: isBinaryAvailable("codex") ? undefined : "codex CLI not on PATH",
-    },
-    {
-      name: "opencloud",
-      available: false,
-      note: "V2 stub",
     },
   ];
 }

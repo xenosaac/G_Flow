@@ -57,8 +57,12 @@ describe("sendChat", () => {
     expect(t!.messages).toHaveLength(2);
     expect(t!.messages[0]!.role).toBe("user");
     expect(t!.messages[0]!.content).toBe("hi");
-    expect(t!.messages[1]!.role).toBe("agent");
+    expect(t!.messages[0]!.backend).toBe("mock");
+    expect(t!.messages[0]!.recorded_at).toBeTruthy();
+    expect(t!.messages[1]!.role).toBe("assistant");
     expect(t!.messages[1]!.content).toBe("Hello, builder.");
+    expect(t!.messages[1]!.backend).toBe("mock");
+    expect(t!.messages[1]!.recorded_at).toBeTruthy();
     expect(t!.messages[1]!.ok).toBe(true);
     expect(t!.backend).toBe("mock");
   });
@@ -74,7 +78,7 @@ describe("sendChat", () => {
     const t = await readTranscript(sid);
     expect(t!.messages).toHaveLength(6);
     expect(t!.messages.map((m) => m.role)).toEqual([
-      "user", "agent", "user", "agent", "user", "agent",
+      "user", "assistant", "user", "assistant", "user", "assistant",
     ]);
     expect(t!.messages[5]!.content).toBe("reply 3");
   });

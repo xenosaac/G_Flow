@@ -58,11 +58,14 @@ def main() -> None:
     fake = os.environ.get("G_FLOW_USERTEST_FAKE", "")
     if fake:
         results = []
+        fake_outcome = fake.lower()
+        if fake_outcome not in ("pass", "fail", "tool_error"):
+            fake_outcome = "pass"
         for a in assertions:
             results.append(
                 {
                     "assertion_id": a.get("id", "unknown"),
-                    "outcome": fake.lower() if fake.lower() in ("pass", "fail") else "pass",
+                    "outcome": fake_outcome,
                     "detail": f"G_FLOW_USERTEST_FAKE={fake}",
                     "evidence": "",
                 }
@@ -131,7 +134,7 @@ def main() -> None:
             results.append(
                 {
                     "assertion_id": aid,
-                    "outcome": "fail",
+                    "outcome": "tool_error",
                     "detail": f"browser-use raised: {tb}",
                     "evidence": "",
                 }
