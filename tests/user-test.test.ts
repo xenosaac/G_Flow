@@ -221,6 +221,84 @@ describe("G2: user-test subprocess outcome → report.status", () => {
     expect(r.steward_hint).toBe("INFRA");
     expect(r.raw_stderr_tail).toContain("ENOENT");
   });
+
+  test("G2: assertion-level tool_error escalates whole report to tool_error/INFRA", async () => {
+    // browser-use installed, exited 0, returned JSON, but the runner
+    // self-reported "tool_error" per assertion (e.g. captcha, rate limit).
+    // The OLD bug: this would map to assertion.outcome=tool_error but report
+    // status would be "pass" (because the only fail check was r.outcome==="fail").
+    // A Steward seeing status=pass would advance the feature; a corrective
+    // Worker would never run, and we'd silently mask infrastructure failures.
+    const r = await runUserTest({
+      flow_id: "f_test_0001",
+      feature,
+      target_dir: "/tmp",
+      target_url: "http://localhost:3000",
+      runner: async () => ({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          results: [
+            { assertion_id: "A-001-002", outcome: "tool_error", detail: "captcha blocked browser-use" },
+            { assertion_id: "A-001-003", outcome: "pass", detail: "ok" },
+          ],
+        }),
+        stderr: "",
+        timedOut: false,
+      }),
+    });
+    expect(r.status).toBe("tool_error");
+    expect(r.steward_hint).toBe("INFRA");
+    expect(r.assertion_results).toHaveLength(2);
+    expect(r.assertion_results[0]!.outcome).toBe("tool_error");
+    expect(r.assertion_results[1]!.outcome).toBe("pass");
+  });
+
+  test("G2: tool_error wins over fail in mixed outcomes", async () => {
+    // If browser-use reports one tool_error and one fail, treat the WHOLE
+    // report as tool_error. Otherwise Steward would route BROKEN_IMPL on the
+    // fail, when the upstream tool was actually broken.
+    const r = await runUserTest({
+      flow_id: "f_test_0001",
+      feature,
+      target_dir: "/tmp",
+      target_url: "http://localhost:3000",
+      runner: async () => ({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          results: [
+            { assertion_id: "A-001-002", outcome: "fail", detail: "form did not submit" },
+            { assertion_id: "A-001-003", outcome: "tool_error", detail: "page never loaded" },
+          ],
+        }),
+        stderr: "",
+        timedOut: false,
+      }),
+    });
+    expect(r.status).toBe("tool_error");
+    expect(r.steward_hint).toBe("INFRA");
+  });
+
+  test("G2: all per-assertion outcomes are pass → status='pass' (no false INFRA)", async () => {
+    const r = await runUserTest({
+      flow_id: "f_test_0001",
+      feature,
+      target_dir: "/tmp",
+      target_url: "http://localhost:3000",
+      runner: async () => ({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          results: [
+            { assertion_id: "A-001-002", outcome: "pass" },
+            { assertion_id: "A-001-003", outcome: "pass" },
+          ],
+        }),
+        stderr: "",
+        timedOut: false,
+      }),
+    });
+    expect(r.status).toBe("pass");
+    expect(r.steward_hint).toBe("NONE");
+  });
 });
 
 describe("writeUserTestReport", () => {

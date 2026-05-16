@@ -136,17 +136,26 @@ export async function runUserTest(
     };
   });
 
+  // G2 second-half fix: per-assertion tool_error must escalate the WHOLE
+  // report to tool_error, not "fail". A misclassified fail would trigger a
+  // corrective Worker against working code.
+  const hasToolError = assertion_results.some((r) => r.outcome === "tool_error");
   const anyFail = assertion_results.some((r) => r.outcome === "fail");
+  const status: "pass" | "fail" | "tool_error" = hasToolError
+    ? "tool_error"
+    : anyFail
+      ? "fail"
+      : "pass";
   return ValidatorReport.parse({
     feature_id: input.feature.id,
     flow_id: input.flow_id,
     validator: "user-test",
-    status: anyFail ? "fail" : "pass",
+    status,
     assertion_results,
     raw_stdout_tail: tailOf(outcome.stdout, 4000),
     raw_stderr_tail: tailOf(outcome.stderr, 4000),
     recorded_at: new Date().toISOString(),
-    steward_hint: "NONE",
+    steward_hint: hasToolError ? "INFRA" : "NONE",
   });
 }
 
