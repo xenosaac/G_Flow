@@ -1,0 +1,9 @@
+#!/usr/bin/env bun
+import { main } from "../src/cli/index.ts";
+
+main(process.argv.slice(2))
+  .then((code) => process.exit(code))
+  .catch((err) => {
+    console.error("gflow:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  });
