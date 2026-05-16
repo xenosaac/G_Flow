@@ -73,8 +73,28 @@ def main() -> None:
     try:
         from browser_use import Agent  # type: ignore  # noqa: F401
     except Exception as e:
-        # G2: ImportError / version mismatch / missing API key surface here.
+        # G2: ImportError / version mismatch surfaces here.
         fail(f"browser-use not importable: {e}", 3)
+        return
+
+    # G2 second-half: browser-use is installed BUT no LLM API key is set.
+    # browser-use needs a provider key to drive the model. With none of these
+    # set, the agent would either crash at the first prompt or silently fail
+    # the assertion — both surface as "code bug" to a corrective Worker. Exit
+    # nonzero so the TS wrapper classifies as tool_error + INFRA instead.
+    api_keys = [
+        os.environ.get("BROWSER_USE_API_KEY"),
+        os.environ.get("OPENAI_API_KEY"),
+        os.environ.get("ANTHROPIC_API_KEY"),
+        os.environ.get("GOOGLE_API_KEY"),
+    ]
+    if not any(k for k in api_keys):
+        fail(
+            "no LLM API key set for browser-use "
+            "(need one of BROWSER_USE_API_KEY / OPENAI_API_KEY / "
+            "ANTHROPIC_API_KEY / GOOGLE_API_KEY)",
+            4,
+        )
         return
 
     # Real run path. Per-assertion: drive browser-use to verify.
