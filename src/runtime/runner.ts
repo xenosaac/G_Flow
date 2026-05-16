@@ -33,6 +33,7 @@ import {
   type ContractT,
 } from "../artifacts/contract.ts";
 import type { FlowStateT } from "../artifacts/state.ts";
+import { enqueueSnapshot } from "../gbrain/client.ts";
 
 export interface RunFlowOptions {
   flow_id: string;
@@ -174,12 +175,37 @@ async function dispatch(
 ): Promise<void> {
   switch (action.type) {
     case "complete": {
+      const now = new Date().toISOString();
+      // Async, fire-and-forget. The runtime never waits for GBrain.
+      if (state.current_feature && state.current_milestone) {
+        enqueueSnapshot({
+          flow_id: opts.flow_id,
+          kind: "feature_close",
+          recorded_at: now,
+          payload: {
+            feature_id: state.current_feature,
+            milestone_id: state.current_milestone,
+          },
+        });
+        enqueueSnapshot({
+          flow_id: opts.flow_id,
+          kind: "milestone_close",
+          recorded_at: now,
+          payload: { milestone_id: state.current_milestone },
+        });
+      }
+      enqueueSnapshot({
+        flow_id: opts.flow_id,
+        kind: "flow_complete",
+        recorded_at: now,
+        payload: {},
+      });
       await writeState(
         {
           ...state,
           phase: "complete",
           current_step: null,
-          updated_at: new Date().toISOString(),
+          updated_at: now,
         },
         ctx.root,
       );
@@ -195,13 +221,31 @@ async function dispatch(
       return;
     }
     case "advance": {
+      const now = new Date().toISOString();
+      enqueueSnapshot({
+        flow_id: opts.flow_id,
+        kind: "feature_close",
+        recorded_at: now,
+        payload: {
+          feature_id: action.from.feature_id,
+          milestone_id: action.from.milestone_id,
+        },
+      });
+      if (action.to.milestone_id !== action.from.milestone_id) {
+        enqueueSnapshot({
+          flow_id: opts.flow_id,
+          kind: "milestone_close",
+          recorded_at: now,
+          payload: { milestone_id: action.from.milestone_id },
+        });
+      }
       await writeState(
         {
           ...state,
           current_milestone: action.to.milestone_id,
           current_feature: action.to.feature_id,
           current_step: null,
-          updated_at: new Date().toISOString(),
+          updated_at: now,
         },
         ctx.root,
       );
