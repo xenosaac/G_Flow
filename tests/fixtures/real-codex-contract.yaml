@@ -1,0 +1,162 @@
+flow_id: f_2026_05_16_3196
+goal: 'build a static single-page todo app in a single index.html (no build
+  step, no dependencies). The page MUST include exactly these elements with
+  these IDs: <input id="todo-input">, <button id="add-todo">Add Todo</button>,
+  <ul id="todo-list"></ul>. Inline <script> wires the click handler so pressing
+  Add Todo appends the trimmed input value as a new <li> to #todo-list and
+  clears the input. Empty/whitespace input is ignored. Save only index.html in
+  the target dir.'
+created_at: 2026-05-16T20:37:08.748Z
+milestones:
+  - id: M-001
+    title: Create single HTML file
+    endpoint_criteria: The target directory contains index.html with the required
+      todo input, add button, and list elements present in the page markup.
+    features:
+      - id: F-001
+        title: Add required markup
+        spec: Create a single index.html file containing the todo app markup. Include
+          exactly the required input, button, and unordered list elements with
+          the specified IDs and button text.
+        assertions:
+          - id: A-001-001
+            text: The target directory contains an index.html file.
+            validator: screwdriver
+            evidence_required: File existence check for index.html in the target directory.
+            status: pending
+            origin: original
+            attempts: []
+            check:
+              kind: file_exists
+              path: index.html
+          - id: A-001-002
+            text: index.html contains an input element with id todo-input.
+            validator: screwdriver
+            evidence_required: index.html contains the exact substring `<input id="todo-input">`.
+            status: pending
+            origin: original
+            attempts: []
+            check:
+              kind: file_contains
+              path: index.html
+              substring: <input id="todo-input">
+          - id: A-001-003
+            text: index.html contains a button element with id add-todo and visible text Add
+              Todo.
+            validator: screwdriver
+            evidence_required: index.html contains the exact substring `<button
+              id="add-todo">Add Todo</button>`.
+            status: pending
+            origin: original
+            attempts: []
+            check:
+              kind: file_contains
+              path: index.html
+              substring: <button id="add-todo">Add Todo</button>
+          - id: A-001-004
+            text: index.html contains an unordered list element with id todo-list.
+            validator: screwdriver
+            evidence_required: index.html contains the exact substring `<ul id="todo-list"></ul>`.
+            status: pending
+            origin: original
+            attempts: []
+            check:
+              kind: file_contains
+              path: index.html
+              substring: <ul id="todo-list"></ul>
+          - id: A-001-005
+            text: The target directory has no saved files other than index.html.
+            validator: screwdriver
+            evidence_required: Command exits with code 0 after confirming index.html is the
+              only regular file in the target directory.
+            status: pending
+            origin: original
+            attempts: []
+            check:
+              kind: command
+              cmd:
+                - python3
+                - -c
+                - >-
+                  import os, sys
+
+                  files=[name for name in os.listdir('.') if
+                  os.path.isfile(name)]
+
+                  sys.exit(0 if files == ['index.html'] else 1)
+              expected_exit_code: 0
+  - id: M-002
+    title: Wire todo interactions
+    endpoint_criteria: Typing a non-empty todo and pressing Add Todo appends one
+      list item with the trimmed value, clears the input, and whitespace-only
+      submissions do not change the list.
+    features:
+      - id: F-002
+        title: Append entered todos
+        spec: Add inline script to register a click handler on the Add Todo button. When
+          clicked, it should read the input value, trim it, append a new li to
+          todo-list for non-empty values, and clear the input.
+        assertions:
+          - id: A-002-001
+            text: index.html contains an inline script element for the todo app behavior.
+            validator: screwdriver
+            evidence_required: index.html contains a `<script>` tag.
+            status: pending
+            origin: original
+            attempts: []
+            check:
+              kind: file_contains
+              path: index.html
+              substring: <script>
+          - id: A-002-002
+            text: "Entering `Buy milk` in #todo-input and clicking #add-todo appends one li
+              under #todo-list with visible text `Buy milk`."
+            validator: user-test
+            evidence_required: "Browser observation showing #todo-list contains one li with
+              visible text `Buy milk` after the click."
+            status: pending
+            origin: original
+            attempts: []
+          - id: A-002-003
+            text: "Entering `   Walk dog   ` in #todo-input and clicking #add-todo appends
+              one li under #todo-list with visible text `Walk dog` without
+              leading or trailing spaces."
+            validator: user-test
+            evidence_required: Browser observation showing the appended li text is exactly
+              `Walk dog` after submission.
+            status: pending
+            origin: original
+            attempts: []
+          - id: A-002-004
+            text: "After a non-empty todo is added, #todo-input value becomes an empty
+              string."
+            validator: user-test
+            evidence_required: "Browser observation showing #todo-input has an empty value
+              immediately after clicking #add-todo."
+            status: pending
+            origin: original
+            attempts: []
+      - id: F-003
+        title: Ignore blank submissions
+        spec: Ensure the click handler does not append a list item when the trimmed
+          input value is empty. Whitespace-only values should leave the existing
+          todo list unchanged.
+        assertions:
+          - id: A-003-001
+            text: "Clicking #add-todo with #todo-input empty does not append any li under
+              #todo-list."
+            validator: user-test
+            evidence_required: "Browser observation showing #todo-list has zero li elements
+              after clicking Add Todo with an empty input."
+            status: pending
+            origin: original
+            attempts: []
+          - id: A-003-002
+            text: "Entering only spaces in #todo-input and clicking #add-todo does not
+              append any li under #todo-list."
+            validator: user-test
+            evidence_required: "Browser observation showing #todo-list li count is unchanged
+              after submitting whitespace-only input."
+            status: pending
+            origin: original
+            attempts: []

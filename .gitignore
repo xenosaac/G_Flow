@@ -1,5 +1,8 @@
 node_modules/
 
+# Private planning / write-up docs
+/*.md
+
 # Runtime
 .gflow/
 
