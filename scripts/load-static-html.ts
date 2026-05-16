@@ -22,6 +22,7 @@ export async function loadStaticHtml(html: string): Promise<StaticPage> {
   await page.waitUntilComplete();
   const win = page.mainFrame.window as any;
   const doc = win.document as any;
+  win.SyntaxError ||= SyntaxError;
 
   const scriptBody = Array.from(doc.getElementsByTagName("script") as Iterable<any>)
     .map((s: any) => s.textContent ?? "")
@@ -29,7 +30,26 @@ export async function loadStaticHtml(html: string): Promise<StaticPage> {
     .join(";\n");
   if (scriptBody) {
     try {
-      new Function("document", "window", "Event", scriptBody)(doc, win, win.Event);
+      new Function(
+        "document",
+        "window",
+        "Event",
+        "localStorage",
+        "sessionStorage",
+        "crypto",
+        "navigator",
+        "location",
+        scriptBody,
+      )(
+        doc,
+        win,
+        win.Event,
+        win.localStorage,
+        win.sessionStorage,
+        win.crypto,
+        win.navigator,
+        win.location,
+      );
     } catch (e) {
       // Re-throw with a clear marker so callers can show the bad script
       throw new Error(

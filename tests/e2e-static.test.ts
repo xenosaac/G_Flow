@@ -273,4 +273,75 @@ describe("E2E synthetic — static todo flow", () => {
     expect(list.children.length).toBe(0);
     await page.close();
   });
+
+  test("browser click verification: inline scripts can use localStorage", async () => {
+    const html = `<!doctype html>
+      <input id="todo-input">
+      <button id="add-todo" type="button">Add Todo</button>
+      <ul id="todo-list"></ul>
+      <script>
+        const stored = JSON.parse(localStorage.getItem("todos") || "[]");
+        const input = document.getElementById("todo-input");
+        const button = document.getElementById("add-todo");
+        const list = document.getElementById("todo-list");
+        function render() {
+          list.innerHTML = "";
+          stored.forEach((text) => {
+            const li = document.createElement("li");
+            li.textContent = text;
+            list.appendChild(li);
+          });
+        }
+        button.addEventListener("click", () => {
+          const text = input.value.trim();
+          if (!text) return;
+          stored.push(text);
+          localStorage.setItem("todos", JSON.stringify(stored));
+          render();
+        });
+        render();
+      </script>`;
+    const page = await loadStaticHtml(html);
+    const { document: doc } = page;
+    doc.getElementById("todo-input").value = "Buy milk";
+    doc.getElementById("add-todo").click();
+    const items = Array.from(doc.getElementById("todo-list").children as Iterable<{ textContent: string }>).map(
+      (li) => (li.textContent ?? "").trim(),
+    );
+    expect(items).toEqual(["Buy milk"]);
+    await page.close();
+  });
+
+  test("browser click verification: submit buttons dispatch form handlers", async () => {
+    const html = `<!doctype html>
+      <form id="todo-form">
+        <input id="todo-input">
+        <button id="add-todo" type="submit">Add Todo</button>
+      </form>
+      <ul id="todo-list"></ul>
+      <script>
+        const form = document.getElementById("todo-form");
+        const input = document.getElementById("todo-input");
+        const list = document.getElementById("todo-list");
+        form.addEventListener("submit", (event) => {
+          event.preventDefault();
+          const text = input.value.trim();
+          if (!text) return;
+          const li = document.createElement("li");
+          li.textContent = text;
+          list.appendChild(li);
+          input.value = "";
+        });
+      </script>`;
+    const page = await loadStaticHtml(html);
+    const { document: doc } = page;
+    doc.getElementById("todo-input").value = "Buy milk";
+    doc.getElementById("add-todo").click();
+    const items = Array.from(doc.getElementById("todo-list").children as Iterable<{ textContent: string }>).map(
+      (li) => (li.textContent ?? "").trim(),
+    );
+    expect(items).toEqual(["Buy milk"]);
+    expect(doc.getElementById("todo-input").value).toBe("");
+    await page.close();
+  });
 });

@@ -112,6 +112,26 @@ describe("runCheck — command", () => {
     expect(r.ok).toBe(true);
   });
 
+  test("command with stdout_includes passes when stdout contains substring", async () => {
+    const r = await runCheck(TMP, {
+      kind: "command",
+      cmd: ["printf", "status=ok"],
+      stdout_includes: "ok",
+    });
+    expect(r.ok).toBe(true);
+    expect(r.detail).toContain("stdout contains");
+  });
+
+  test("command with stdout_includes fails when stdout lacks substring", async () => {
+    const r = await runCheck(TMP, {
+      kind: "command",
+      cmd: ["printf", "status=nope"],
+      stdout_includes: "ok",
+    });
+    expect(r.ok).toBe(false);
+    expect(r.detail).toContain("stdout does NOT contain");
+  });
+
   test("command timing out is reported", async () => {
     const r = await runCheck(TMP, {
       kind: "command",

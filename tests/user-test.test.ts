@@ -1,9 +1,19 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdir, rm, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, rm, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { runUserTest, writeUserTestReport } from "../src/runtime/validators/user-test.ts";
 import type { FeatureT } from "../src/artifacts/contract.ts";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const PY_RUNNER = join(HERE, "..", "scripts", "user_test_runner.py");
+const PROVIDER_KEYS = [
+  "BROWSER_USE_API_KEY",
+  "OPENAI_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "GOOGLE_API_KEY",
+];
 
 const feature: FeatureT = {
   id: "F-001",
@@ -301,6 +311,44 @@ describe("G2: user-test subprocess outcome → report.status", () => {
   });
 });
 
+describe("scripts/user_test_runner.py G2 contract", () => {
+  let TMP: string;
+  beforeEach(async () => {
+    TMP = join(tmpdir(), `gflow-python-usertest-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    await mkdir(TMP, { recursive: true });
+  });
+  afterEach(async () => {
+    await rm(TMP, { recursive: true, force: true });
+  });
+
+  test("browser-use importable but no provider key exits 4", async () => {
+    await writeFile(join(TMP, "browser_use.py"), "class Agent:\n    pass\n", "utf8");
+    const r = await runPythonRunner(TMP, {});
+    expect(r.exitCode).toBe(4);
+    expect(r.stderr).toContain("no LLM API key set");
+  });
+
+  test("browser-use assertion exception emits per-assertion tool_error", async () => {
+    await writeFile(
+      join(TMP, "browser_use.py"),
+      [
+        "class Agent:",
+        "    def __init__(self, task):",
+        "        self.task = task",
+        "    def run_sync(self):",
+        "        raise RuntimeError('browser launch failed')",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const r = await runPythonRunner(TMP, { OPENAI_API_KEY: "test-key" });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.results[0].outcome).toBe("tool_error");
+    expect(parsed.results[0].detail).toContain("browser launch failed");
+  });
+});
+
 describe("writeUserTestReport", () => {
   let TMP: string;
   beforeEach(async () => {
@@ -333,3 +381,40 @@ describe("writeUserTestReport", () => {
     expect(back.status).toBe("pass");
   });
 });
+
+async function runPythonRunner(
+  cwd: string,
+  envOverrides: Record<string, string>,
+): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined && !PROVIDER_KEYS.includes(k)) env[k] = v;
+  }
+  env.PYTHONPATH = cwd;
+  Object.assign(env, envOverrides);
+
+  const proc = Bun.spawn(["python3", PY_RUNNER], {
+    cwd,
+    env,
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  proc.stdin.write(JSON.stringify({
+    target_url: "http://localhost:3000",
+    assertions: [
+      {
+        id: "A-001-002",
+        text: "Form redirects to /dashboard",
+        evidence_required: "screenshot",
+      },
+    ],
+  }));
+  proc.stdin.end();
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]);
+  return { exitCode, stdout, stderr };
+}

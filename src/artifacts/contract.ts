@@ -38,6 +38,7 @@ export const CommandCheck = z.object({
   kind: z.literal("command"),
   cmd: z.array(z.string().min(1)).min(1),
   expected_exit_code: z.number().int().optional(),
+  stdout_includes: z.string().min(1).optional(),
   timeout_ms: z.number().int().positive().optional(),
 });
 export type CommandCheckT = z.infer<typeof CommandCheck>;

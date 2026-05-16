@@ -100,7 +100,7 @@ For every `screwdriver` assertion, the Planner emits a `check` field that tells 
 ```yaml
 check: { kind: file_exists, path: index.html }
 check: { kind: file_contains, path: src/app.ts, substring: "router.refresh()" }
-check: { kind: command, cmd: [curl, -fsS, http://localhost:3000/health] }
+check: { kind: command, cmd: [curl, -fsS, http://localhost:3000/health], stdout_includes: ok }
 ```
 
 Path inputs are resolved INSIDE `target_dir`; absolute paths and `..` escapes are rejected. Commands run as argv (no shell), with a 60-second default timeout.
@@ -146,7 +146,7 @@ Chat transcripts are persisted to `.gflow/chat/<session_id>.json` (atomic writes
 | `GFLOW_CLAUDE_BIN` | `claude` | Path to the `claude` CLI |
 | `GFLOW_CODEX_BIN` | `codex` | Path to the `codex` CLI |
 | `GFLOW_PYTHON` | `python3` | Python interpreter for `scripts/user_test_runner.py` |
-| `G_FLOW_USERTEST_FAKE` | unset | `pass` / `fail` → Python wrapper returns canned results without browser-use (useful for demos and CI). |
+| `G_FLOW_USERTEST_FAKE` | unset | `pass` / `fail` / `tool_error` → Python wrapper returns canned results without browser-use (useful for demos and CI). |
 | `BROWSER_USE_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_API_KEY` | unset | At least one needed when browser-use is installed; absent → exit 4 → tool_error / INFRA (G2). |
 | `GBRAIN_API_KEY` | unset | When set, V2 will POST snapshots to GBrain. V1 writes JSONL locally either way. |
 

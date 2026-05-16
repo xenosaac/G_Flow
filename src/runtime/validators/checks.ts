@@ -23,6 +23,7 @@ export async function runCheck(
         target_dir,
         check.cmd,
         check.expected_exit_code ?? 0,
+        check.stdout_includes,
         check.timeout_ms ?? DEFAULT_CHECK_TIMEOUT_MS,
       );
   }
@@ -70,6 +71,7 @@ async function runCommand(
   target_dir: string,
   cmd: string[],
   expectedExit: number,
+  stdoutIncludes: string | undefined,
   timeoutMs: number,
 ): Promise<CheckOutcome> {
   if (cmd.length === 0) return { ok: false, detail: "empty cmd array" };
@@ -97,10 +99,18 @@ async function runCommand(
         detail: `${cmd.join(" ")} timed out after ${timeoutMs}ms`,
       };
     }
-    if (exitCode === expectedExit) {
+    if (exitCode === expectedExit && (!stdoutIncludes || stdout.includes(stdoutIncludes))) {
       return {
         ok: true,
-        detail: `${cmd.join(" ")} → exit=${exitCode}`,
+        detail: stdoutIncludes
+          ? `${cmd.join(" ")} → exit=${exitCode}; stdout contains "${truncate(stdoutIncludes, 60)}"`
+          : `${cmd.join(" ")} → exit=${exitCode}`,
+      };
+    }
+    if (exitCode === expectedExit && stdoutIncludes && !stdout.includes(stdoutIncludes)) {
+      return {
+        ok: false,
+        detail: `${cmd.join(" ")} → exit=${exitCode}; stdout does NOT contain "${truncate(stdoutIncludes, 60)}"; stdout=${tail(stdout, 200)}; stderr=${tail(stderr, 200)}`,
       };
     }
     return {
