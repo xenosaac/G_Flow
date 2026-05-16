@@ -50,7 +50,7 @@ export default function ConsoleClient({
         </div>
       </header>
 
-      <AgentWorkbench />
+      <AgentWorkbench snapshot={snapshot} />
 
       {snapshot ? (
         <>
@@ -63,7 +63,7 @@ export default function ConsoleClient({
         <section className="panel">
           <h2>No flow yet</h2>
           <div className="empty">
-            Type a goal in the Workbench above and press <strong>Start Flow</strong>, or run <code>gflow start &quot;&lt;goal&gt;&quot;</code> in this directory.
+            Type <code>/start &lt;goal&gt;</code> in the Workbench above, or run <code>gflow start &quot;&lt;goal&gt;&quot;</code> in this directory.
           </div>
         </section>
       )}

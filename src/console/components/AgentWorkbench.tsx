@@ -1,6 +1,8 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
+import { parseCommand, HELP_TEXT } from "../lib/commands.ts";
+import type { FlowSnapshot } from "../lib/snapshot.ts";
 
 interface BackendInfo {
   name: string;
@@ -9,22 +11,32 @@ interface BackendInfo {
 }
 
 interface TranscriptEntry {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   content: string;
-  recorded_at: string;
+  ts: string;
   ok?: boolean;
 }
 
-export default function AgentWorkbench() {
+const ROLE_LABEL: Record<TranscriptEntry["role"], string> = {
+  user: "user  ",
+  assistant: "agent ",
+  system: "system",
+};
+
+export default function AgentWorkbench({
+  snapshot,
+}: {
+  snapshot: FlowSnapshot | null;
+}) {
   const [backends, setBackends] = useState<BackendInfo[]>([]);
   const [selectedBackend, setSelectedBackend] = useState<string>("");
-  const [goal, setGoal] = useState("");
-  const [message, setMessage] = useState("");
-  const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([
+    { role: "system", content: HELP_TEXT, ts: new Date().toISOString() },
+  ]);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [busy, setBusy] = useState<"" | "chat" | "start" | "resume">("");
-  const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState<string>("");
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     fetch("/api/backends")
@@ -35,111 +47,168 @@ export default function AgentWorkbench() {
         if (firstAvail) setSelectedBackend(firstAvail.name);
         else if (data.backends.length) setSelectedBackend(data.backends[0]!.name);
       })
-      .catch((e) => setError(`failed to load backends: ${e.message}`));
+      .catch((e) =>
+        push({
+          role: "system",
+          content: `error loading /api/backends: ${e instanceof Error ? e.message : String(e)}`,
+          ts: new Date().toISOString(),
+          ok: false,
+        }),
+      );
   }, []);
 
-  const send = async () => {
-    if (!message.trim() || busy) return;
-    setBusy("chat");
-    setError(null);
-    try {
-      const r = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          session_id: sessionId,
-          backend: selectedBackend,
-          message,
-        }),
-      });
-      const data = await r.json();
-      if (!r.ok || data.error) {
-        setError(data.error || `HTTP ${r.status}`);
-        return;
-      }
-      setSessionId(data.session_id);
-      const now = new Date().toISOString();
-      setTranscript((prev) => [
-        ...prev,
-        { role: "user", content: message, recorded_at: now },
-        { role: "assistant", content: data.reply ?? "", recorded_at: now, ok: data.ok },
-      ]);
-      setMessage("");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy("");
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  };
+  }, [transcript]);
 
-  const startFlow = async () => {
-    if (!goal.trim() || busy) return;
-    setBusy("start");
-    setError(null);
-    setStatus("");
-    try {
-      const r = await fetch("/api/flows/start", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ goal, backend: selectedBackend }),
-      });
-      const data = await r.json();
-      if (!r.ok || !data.ok) {
-        const issues = (data.issues as string[] | undefined) ?? [];
-        setError(
-          (data.error || `HTTP ${r.status}`) +
-            (issues.length ? "\n• " + issues.join("\n• ") : ""),
-        );
-        return;
-      }
-      setStatus(
-        `Flow ${data.flow_id} created. ${data.milestones}M / ${data.features}F / ${data.assertions}A. Approve to run Phase 2.`,
-      );
-      setGoal("");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy("");
-    }
-  };
+  function push(entry: TranscriptEntry) {
+    setTranscript((prev) => [...prev, entry]);
+  }
 
-  const approveResume = async () => {
-    if (busy) return;
-    setBusy("resume");
-    setError(null);
+  function formatStatus(snap: FlowSnapshot | null): string {
+    if (!snap) return "No active flow. Try /start <goal>.";
+    const s = snap.state;
+    const counts = snap.contract
+      ? `${snap.contract.milestones.length}M / ${snap.contract.milestones.reduce((t, m) => t + m.features.length, 0)}F / ${snap.contract.milestones.reduce((t, m) => t + m.features.reduce((u, f) => u + f.assertions.length, 0), 0)}A`
+      : "no contract yet";
+    const line1 = `Flow ${snap.flow_id} · phase=${s.phase} · M=${s.current_milestone ?? "—"} · F=${s.current_feature ?? "—"} · step=${s.current_step ?? "—"}`;
+    const line2 = counts;
+    const hr =
+      s.phase === "needs_human" && snap.needs_human_reason
+        ? `\n⚠ ${snap.needs_human_reason}`
+        : "";
+    return `${line1}\n${line2}${hr}`;
+  }
+
+  async function submit() {
+    const raw = input;
+    const cmd = parseCommand(raw);
+    if (!cmd) return;
+    const now = new Date().toISOString();
+    push({ role: "user", content: raw, ts: now });
+    setInput("");
+    setBusy(true);
     try {
-      const r = await fetch("/api/flows/resume", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ backend: selectedBackend }),
-      });
-      const data = await r.json();
-      if (!r.ok || !data.ok) {
-        setError(data.error || `HTTP ${r.status}`);
-        return;
+      switch (cmd.kind) {
+        case "help":
+          push({ role: "system", content: HELP_TEXT, ts: new Date().toISOString() });
+          break;
+        case "status":
+          push({
+            role: "system",
+            content: formatStatus(snapshot),
+            ts: new Date().toISOString(),
+          });
+          break;
+        case "start": {
+          const r = await fetch("/api/flows/start", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ goal: cmd.goal, backend: selectedBackend }),
+          });
+          const d = await r.json();
+          const ok = !!d.ok && r.ok;
+          push({
+            role: "system",
+            content: ok
+              ? `Flow ${d.flow_id} created. ${d.milestones}M / ${d.features}F / ${d.assertions}A. Run /resume to start Phase 2.`
+              : `error: ${d.error ?? `HTTP ${r.status}`}${
+                  (d.issues as string[] | undefined)?.length
+                    ? "\n• " + (d.issues as string[]).join("\n• ")
+                    : ""
+                }`,
+            ts: new Date().toISOString(),
+            ok,
+          });
+          break;
+        }
+        case "resume": {
+          const r = await fetch("/api/flows/resume", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ backend: selectedBackend }),
+          });
+          const d = await r.json();
+          const ok = !!d.ok && r.ok;
+          push({
+            role: "system",
+            content: ok
+              ? `Flow ${d.flow_id} → ${d.status} (${d.iterations} iter${d.reason ? "; " + d.reason : ""})`
+              : `error: ${d.error ?? `HTTP ${r.status}`}`,
+            ts: new Date().toISOString(),
+            ok,
+          });
+          break;
+        }
+        case "chat": {
+          const r = await fetch("/api/chat", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              session_id: sessionId,
+              backend: selectedBackend,
+              message: cmd.text,
+            }),
+          });
+          const d = await r.json();
+          if (d.session_id) setSessionId(d.session_id);
+          const ok = !!d.ok && r.ok;
+          push({
+            role: ok ? "assistant" : "system",
+            content: ok ? (d.reply ?? "") : `error: ${d.error ?? `HTTP ${r.status}`}`,
+            ts: new Date().toISOString(),
+            ok,
+          });
+          break;
+        }
+        case "unknown":
+          push({
+            role: "system",
+            content: `unknown command: ${cmd.name}. Try /help.`,
+            ts: new Date().toISOString(),
+            ok: false,
+          });
+          break;
       }
-      setStatus(
-        `Flow ${data.flow_id} → ${data.status} (${data.iterations} iter${data.reason ? "; " + data.reason : ""})`,
-      );
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      push({
+        role: "system",
+        content: `error: ${e instanceof Error ? e.message : String(e)}`,
+        ts: new Date().toISOString(),
+        ok: false,
+      });
     } finally {
-      setBusy("");
+      setBusy(false);
     }
-  };
+  }
 
   return (
     <section className="panel" data-testid="agent-workbench">
       <h2>Agent Workbench</h2>
 
-      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 12 }}>
+      <div
+        style={{
+          display: "flex",
+          gap: 8,
+          alignItems: "center",
+          marginBottom: 12,
+        }}
+      >
         <label style={{ fontSize: 12, color: "var(--text-dim)" }}>Backend</label>
         <select
           value={selectedBackend}
           onChange={(e) => setSelectedBackend(e.target.value)}
-          disabled={busy !== ""}
+          disabled={busy}
           data-testid="backend-select"
-          style={{ background: "var(--bg-elev)", color: "var(--text)", padding: "4px 8px", border: "1px solid var(--border)", borderRadius: 4 }}
+          style={{
+            background: "var(--bg-elev)",
+            color: "var(--text)",
+            padding: "4px 8px",
+            border: "1px solid var(--border)",
+            borderRadius: 4,
+          }}
         >
           {backends.map((b) => (
             <option key={b.name} value={b.name} disabled={!b.available}>
@@ -148,157 +217,130 @@ export default function AgentWorkbench() {
             </option>
           ))}
         </select>
-        {busy ? (
-          <span style={{ fontSize: 11, color: "var(--warn)" }}>● {busy}…</span>
-        ) : null}
-      </div>
-
-      <div style={{ marginBottom: 16 }}>
-        <textarea
-          rows={3}
-          placeholder="What do you want to build? (e.g., a static todo app with one input and a list…)"
-          value={goal}
-          onChange={(e) => setGoal(e.target.value)}
-          disabled={busy !== ""}
-          style={textareaStyle}
-          data-testid="goal-textarea"
-        />
-        <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
-          <button
-            type="button"
-            onClick={startFlow}
-            disabled={busy !== "" || !goal.trim()}
-            data-testid="start-flow-btn"
-            style={btnStyle}
-          >
-            Start Flow
-          </button>
-          <button
-            type="button"
-            onClick={approveResume}
-            disabled={busy !== ""}
-            data-testid="approve-btn"
-            style={btnStyle}
-          >
-            Approve / Resume
-          </button>
-        </div>
-      </div>
-
-      <div style={{ marginBottom: 8 }}>
-        <textarea
-          rows={2}
-          placeholder="Chat with the agent (Cmd/Ctrl+Enter to send)"
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-              e.preventDefault();
-              void send();
-            }
-          }}
-          disabled={busy !== ""}
-          style={textareaStyle}
-          data-testid="chat-textarea"
-        />
-        <button
-          type="button"
-          onClick={send}
-          disabled={busy !== "" || !message.trim()}
-          data-testid="send-btn"
-          style={{ ...btnStyle, marginTop: 6 }}
-        >
-          {busy === "chat" ? "Working…" : "Send"}
-        </button>
-      </div>
-
-      {error ? (
-        <div
-          data-testid="workbench-error"
+        <span
           style={{
-            background: "var(--fail)",
-            color: "#1a0606",
-            padding: 8,
-            borderRadius: 4,
-            marginBottom: 8,
-            whiteSpace: "pre-wrap",
-            fontSize: 12,
+            marginLeft: "auto",
+            fontSize: 11,
+            color: busy ? "var(--warn)" : "var(--text-dim)",
           }}
         >
-          {error}
-        </div>
-      ) : null}
+          {busy ? "● busy…" : "● idle"}
+        </span>
+      </div>
 
-      {status ? (
-        <div
-          data-testid="workbench-status"
-          style={{
-            background: "var(--bg-elev)",
-            padding: 8,
-            borderRadius: 4,
-            marginBottom: 8,
-            fontSize: 12,
-          }}
-        >
-          {status}
-        </div>
-      ) : null}
-
-      <div data-testid="transcript" style={{ maxHeight: 360, overflowY: "auto" }}>
-        {transcript.length === 0 ? (
-          <div className="empty">No conversation yet. Pick a backend, type a message, and Send.</div>
-        ) : (
-          transcript.map((m, i) => (
+      <div
+        ref={scrollRef}
+        data-testid="workbench-transcript"
+        style={{
+          maxHeight: 480,
+          overflowY: "auto",
+          marginBottom: 12,
+          background: "var(--bg)",
+          border: "1px solid var(--border)",
+          borderRadius: 4,
+          padding: 12,
+          fontSize: 12,
+          fontFamily: "inherit",
+        }}
+      >
+        {transcript.map((m, i) => (
+          <div
+            key={i}
+            style={{
+              marginBottom: 8,
+              paddingLeft: 8,
+              borderLeft: `2px solid ${
+                m.ok === false
+                  ? "var(--fail)"
+                  : m.role === "user"
+                    ? "var(--accent)"
+                    : m.role === "assistant"
+                      ? "var(--pass)"
+                      : "var(--border)"
+              }`,
+            }}
+          >
             <div
-              key={i}
               style={{
-                marginBottom: 8,
-                padding: 8,
-                background: m.role === "user" ? "var(--bg-elev)" : "var(--bg)",
-                borderLeft: `3px solid ${m.role === "user" ? "var(--accent)" : m.ok === false ? "var(--fail)" : "var(--border)"}`,
-                borderRadius: 4,
+                fontSize: 10,
+                color: "var(--text-dim)",
+                letterSpacing: "0.05em",
+                marginBottom: 2,
+                textTransform: "uppercase",
               }}
             >
-              <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>
-                {m.role}
-              </div>
-              <pre
-                style={{
-                  whiteSpace: "pre-wrap",
-                  fontFamily: "inherit",
-                  fontSize: 12,
-                  margin: 0,
-                }}
-              >
-                {m.content}
-              </pre>
+              [{ROLE_LABEL[m.role]}]
             </div>
-          ))
-        )}
+            <pre
+              style={{
+                whiteSpace: "pre-wrap",
+                fontFamily: "inherit",
+                fontSize: 12,
+                margin: 0,
+                color: m.ok === false ? "var(--fail)" : "var(--text)",
+              }}
+            >
+              {m.content}
+            </pre>
+          </div>
+        ))}
+      </div>
+
+      <textarea
+        value={input}
+        onChange={(e) => setInput(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            void submit();
+          }
+        }}
+        disabled={busy}
+        rows={4}
+        placeholder="> type a message, or /start <goal>, /resume, /status, /help"
+        data-testid="workbench-input"
+        style={{
+          width: "100%",
+          padding: 10,
+          background: "var(--bg-elev)",
+          color: "var(--text)",
+          border: "1px solid var(--border)",
+          borderRadius: 4,
+          fontFamily: "inherit",
+          fontSize: 13,
+          resize: "vertical",
+        }}
+      />
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginTop: 6,
+        }}
+      >
+        <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+          Cmd/Ctrl+Enter sends · Enter inserts newline
+        </span>
+        <button
+          type="button"
+          onClick={() => void submit()}
+          disabled={busy || !input.trim()}
+          data-testid="workbench-send"
+          style={{
+            padding: "6px 14px",
+            background: "var(--accent)",
+            color: "#0b0d10",
+            border: "none",
+            borderRadius: 4,
+            fontWeight: 600,
+            fontSize: 12,
+            cursor: "pointer",
+          }}
+        >
+          {busy ? "working…" : "send"}
+        </button>
       </div>
     </section>
   );
 }
-
-const textareaStyle: React.CSSProperties = {
-  width: "100%",
-  padding: 8,
-  background: "var(--bg-elev)",
-  color: "var(--text)",
-  border: "1px solid var(--border)",
-  borderRadius: 4,
-  fontFamily: "inherit",
-  fontSize: 13,
-  resize: "vertical",
-};
-
-const btnStyle: React.CSSProperties = {
-  padding: "6px 14px",
-  background: "var(--accent)",
-  color: "#0b0d10",
-  border: "none",
-  borderRadius: 4,
-  fontWeight: 600,
-  fontSize: 12,
-  cursor: "pointer",
-};
