@@ -21,6 +21,39 @@ export const AssertionAttempt = z.object({
 });
 export type AssertionAttemptT = z.infer<typeof AssertionAttempt>;
 
+export const FileExistsCheck = z.object({
+  kind: z.literal("file_exists"),
+  path: z.string().min(1),
+});
+export type FileExistsCheckT = z.infer<typeof FileExistsCheck>;
+
+export const FileContainsCheck = z.object({
+  kind: z.literal("file_contains"),
+  path: z.string().min(1),
+  substring: z.string().min(1),
+});
+export type FileContainsCheckT = z.infer<typeof FileContainsCheck>;
+
+export const CommandCheck = z.object({
+  kind: z.literal("command"),
+  cmd: z.array(z.string().min(1)).min(1),
+  expected_exit_code: z.number().int().optional(),
+  timeout_ms: z.number().int().positive().optional(),
+});
+export type CommandCheckT = z.infer<typeof CommandCheck>;
+
+/**
+ * Per-assertion mechanical check for Screwdriver. Optional — when absent,
+ * Screwdriver falls back to legacy project-wide `bun test` + `tsc --noEmit`
+ * (skipped when the project has no test script / tsconfig).
+ */
+export const AssertionCheck = z.discriminatedUnion("kind", [
+  FileExistsCheck,
+  FileContainsCheck,
+  CommandCheck,
+]);
+export type AssertionCheckT = z.infer<typeof AssertionCheck>;
+
 export const Assertion = z.object({
   id: z.string().min(1),
   text: z.string().min(1),
@@ -29,6 +62,7 @@ export const Assertion = z.object({
   status: AssertionStatus.default("pending"),
   origin: AssertionOrigin.default("original"),
   attempts: z.array(AssertionAttempt).default([]),
+  check: AssertionCheck.optional(),
 });
 export type AssertionT = z.infer<typeof Assertion>;
 
