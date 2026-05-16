@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { main } from "../src/cli/index.ts";
 
-describe("M1 bootstrap", () => {
+describe("M1 bootstrap CLI surface", () => {
   test("`gflow help` exits 0", async () => {
     const code = await main(["help"]);
     expect(code).toBe(0);
@@ -12,13 +12,13 @@ describe("M1 bootstrap", () => {
     expect(code).toBe(0);
   });
 
-  test("`gflow start` is wired but not yet implemented (exits 2)", async () => {
-    const code = await main(["start", "build a todo app"]);
-    expect(code).toBe(2);
-  });
-
   test("unknown command exits 64", async () => {
     const code = await main(["frobnicate"]);
+    expect(code).toBe(64);
+  });
+
+  test("`gflow start` without a goal exits 64", async () => {
+    const code = await main(["start"]);
     expect(code).toBe(64);
   });
 });
