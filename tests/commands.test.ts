@@ -88,8 +88,14 @@ describe("parseCommand", () => {
   });
 
   test("HELP_TEXT mentions every slash command", () => {
-    for (const c of ["/start", "/resume", "/approve", "/status", "/help"]) {
+    for (const c of ["/start", "/resume", "/approve", "/status", "/new", "/help"]) {
       expect(HELP_TEXT).toContain(c);
     }
+  });
+
+  test("/new and /clear → new", () => {
+    expect(parseCommand("/new")).toEqual({ kind: "new" });
+    expect(parseCommand("/clear")).toEqual({ kind: "new" });
+    expect(parseCommand("/NEW")).toEqual({ kind: "new" });
   });
 });

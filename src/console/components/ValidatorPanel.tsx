@@ -2,31 +2,68 @@
 
 import type { FlowSnapshot } from "../lib/snapshot.ts";
 import type { ValidatorReportT } from "../../artifacts/reports.ts";
+import type { FlowStepT } from "../../artifacts/state.ts";
 
-export default function ValidatorPanel({ snapshot }: { snapshot: FlowSnapshot }) {
+const STEP_TO_BLOCK: Record<FlowStepT, "screwdriver" | "usertest" | "triage" | null> = {
+  worker: null,
+  screwdriver: "screwdriver",
+  usertest: "usertest",
+  steward_encode: null,
+  steward_triage: "triage",
+};
+
+export default function ValidatorPanel({ snapshot }: { snapshot: FlowSnapshot | null }) {
+  if (!snapshot) {
+    return (
+      <section className="panel">
+        <h2>Validator</h2>
+        <div className="empty">No validator activity yet.</div>
+      </section>
+    );
+  }
   const { screwdriver, usertest, triage } = snapshot.latest;
   if (!screwdriver && !usertest && !triage) {
     return (
       <section className="panel">
-        <h2>Validators</h2>
+        <h2>Validator</h2>
         <div className="empty">No validator reports yet for the current feature.</div>
       </section>
     );
   }
+
+  const step = snapshot.state.current_step;
+  const animate = snapshot.state.phase === "executing";
+  const activeBlock = step ? STEP_TO_BLOCK[step] : null;
+
   return (
     <section className="panel">
-      <h2>Validators (latest for current feature)</h2>
-      {screwdriver ? <ValidatorBlock report={screwdriver} label="Screwdriver" /> : null}
-      {usertest ? <ValidatorBlock report={usertest} label="User Testing" /> : null}
+      <h2>Validator</h2>
+      {screwdriver ? (
+        <ValidatorBlock
+          report={screwdriver}
+          label="Screwdriver"
+          current={activeBlock === "screwdriver"}
+          animate={animate}
+        />
+      ) : null}
+      {usertest ? (
+        <ValidatorBlock
+          report={usertest}
+          label="User Testing"
+          current={activeBlock === "usertest"}
+          animate={animate}
+        />
+      ) : null}
       {triage ? (
         <div
-          className={`validator-block ${
-            triage.classification === "INFRA"
-              ? "fail"
-              : triage.classification === "BROKEN_IMPL"
-                ? "fail"
-                : "pass"
-          }`}
+          className={[
+            "validator-block",
+            triage.classification === "MISSING_ASSERTION" ? "pass" : "fail",
+            activeBlock === "triage" ? "current" : "",
+            activeBlock === "triage" && animate ? "animate" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
         >
           <div className="v-header">
             <span>Steward triage</span>
@@ -42,12 +79,19 @@ export default function ValidatorPanel({ snapshot }: { snapshot: FlowSnapshot })
 function ValidatorBlock({
   report,
   label,
+  current,
+  animate,
 }: {
   report: ValidatorReportT;
   label: string;
+  current: boolean;
+  animate: boolean;
 }) {
+  const classes = ["validator-block", report.status];
+  if (current) classes.push("current");
+  if (current && animate) classes.push("animate");
   return (
-    <div className={`validator-block ${report.status}`}>
+    <div className={classes.join(" ")}>
       <div className="v-header">
         <span>
           {label}{" "}

@@ -7,6 +7,7 @@ import {
   initialState,
   latestFlow,
   newFlowId,
+  readState,
   writeState,
 } from "./state.ts";
 import { plan, PlannerError } from "./planner.ts";
@@ -125,6 +126,89 @@ export async function resumeFlowAPI(
     status: r.status,
     iterations: r.iterations,
     reason: r.reason,
+  };
+}
+
+export interface ReplanFlowInput {
+  flow_id: string;
+  backend: AgentBackend;
+  clarifications: string;
+  root?: string;
+}
+
+export interface ReplanFlowResult {
+  flow_id: string;
+  contract_path: string;
+  milestones: number;
+  features: number;
+  assertions: number;
+  /** Rev counter: how many times contract.yaml has been rewritten for this flow. */
+  revision: number;
+}
+
+/**
+ * Re-run the Planner against an existing flow in `phase === "planning"`.
+ * Preserves the flow_id and goal; rewrites contract.yaml in place. Used by
+ * the Console's "auto-revise on every message" behavior — every user
+ * message in plan mode passes the chat history as `clarifications`.
+ *
+ * Rejects flows not in planning (would silently overwrite an executing
+ * contract otherwise).
+ */
+export async function replanFlowAPI(
+  input: ReplanFlowInput,
+): Promise<ReplanFlowResult> {
+  if (!input.flow_id || input.flow_id.trim() === "") {
+    throw new Error("flow_id required");
+  }
+  const root = input.root ?? gflowRoot();
+  const state = await readState(input.flow_id, root).catch(() => null);
+  if (!state) {
+    throw new Error(`flow ${input.flow_id} not found`);
+  }
+  if (state.phase !== "planning") {
+    throw new Error(
+      `flow ${input.flow_id} is in phase=${state.phase}; replan requires phase=planning`,
+    );
+  }
+  // Read the original goal that was written when the flow was minted.
+  const goalPath = join(flowDir(input.flow_id, root), "goal.txt");
+  const { readFile } = await import("node:fs/promises");
+  const goal = (await readFile(goalPath, "utf8")).trim();
+  if (!goal) throw new Error(`flow ${input.flow_id} has no goal.txt`);
+
+  const { contract } = await plan({
+    flow_id: input.flow_id,
+    goal,
+    clarifications: input.clarifications,
+    cwd: flowDir(input.flow_id, root),
+    backend: input.backend,
+  });
+  const contractPath = join(flowDir(input.flow_id, root), "contract.yaml");
+  await writeContractYaml(contract, contractPath);
+
+  // Touch state so any UI watching mtimes sees the revision.
+  await writeState({ ...state, updated_at: new Date().toISOString() }, root);
+
+  const features = contract.milestones.reduce(
+    (s, m) => s + m.features.length,
+    0,
+  );
+  const assertions = contract.milestones.reduce(
+    (s, m) => s + m.features.reduce((t, f) => t + f.assertions.length, 0),
+    0,
+  );
+  // Revision counter: counts unique (flow_id) replan calls. We don't persist
+  // a counter on disk; the UI tracks it locally if it wants. For now we just
+  // return 0 to signal "the helper itself doesn't track revisions" — the API
+  // route layer can supply its own counter if needed.
+  return {
+    flow_id: input.flow_id,
+    contract_path: contractPath,
+    milestones: contract.milestones.length,
+    features,
+    assertions,
+    revision: 0,
   };
 }
 
