@@ -15,6 +15,7 @@ const sampleAssertion = {
   text: "POST /api/auth/signup returns 201 with {token}",
   validator: "screwdriver" as const,
   evidence_required: "HTTP response capture",
+  check: { kind: "command" as const, cmd: ["bun", "test"], expected_exit_code: 0 },
 };
 
 const sampleFeature = {
@@ -68,6 +69,21 @@ describe("contract schema", () => {
     expect(() =>
       Assertion.parse({ ...sampleAssertion, validator: "playwright" as never }),
     ).toThrow();
+  });
+
+  test("requires check for screwdriver assertions", () => {
+    const { check: _check, ...withoutCheck } = sampleAssertion;
+    expect(() => Assertion.parse(withoutCheck)).toThrow(/check/);
+  });
+
+  test("requires user_check for user-test assertions", () => {
+    expect(() =>
+      Assertion.parse({
+        ...sampleAssertion,
+        validator: "user-test",
+        check: undefined,
+      }),
+    ).toThrow(/user_check/);
   });
 
   test("rejects milestone with no features", () => {

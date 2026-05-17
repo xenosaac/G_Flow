@@ -50,6 +50,10 @@ describe("parseCommand", () => {
     expect(parseCommand("/Resume")).toEqual({ kind: "resume" }); // case-insensitive
   });
 
+  test("/pause → pause", () => {
+    expect(parseCommand("/pause")).toEqual({ kind: "pause" });
+  });
+
   test("/status → status", () => {
     expect(parseCommand("/status")).toEqual({ kind: "status" });
   });
@@ -88,7 +92,7 @@ describe("parseCommand", () => {
   });
 
   test("HELP_TEXT mentions every slash command", () => {
-    for (const c of ["/start", "/resume", "/approve", "/status", "/new", "/help"]) {
+    for (const c of ["/start", "/pause", "/resume", "/approve", "/status", "/new", "/help"]) {
       expect(HELP_TEXT).toContain(c);
     }
   });

@@ -67,6 +67,7 @@ const contract = Contract.parse({
               text: "POST returns 201",
               validator: "screwdriver",
               evidence_required: "HTTP capture",
+              check: { kind: "command", cmd: ["true"], expected_exit_code: 0 },
             },
           ],
         },
@@ -139,7 +140,7 @@ describe("readSnapshot", () => {
     await writeContractYaml(contract, join(TMP, FLOW, "contract.yaml"));
     const triage = {
       classification: "INFRA",
-      rationale: "browser-use crashed",
+      rationale: "browser runner crashed",
       new_assertions: [],
     };
     await writeFile(
@@ -149,7 +150,7 @@ describe("readSnapshot", () => {
     );
     const s = await readSnapshot(FLOW);
     expect(s!.needs_human_reason).toMatch(/INFRA/);
-    expect(s!.needs_human_reason).toMatch(/browser-use crashed/);
+    expect(s!.needs_human_reason).toMatch(/browser runner crashed/);
   });
 
   test("synthesizes needs_human_reason from usertest tool_error when no triage on disk", async () => {

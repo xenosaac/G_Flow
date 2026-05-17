@@ -11,17 +11,23 @@ import {
 import { plan, PlannerError } from "../runtime/planner.ts";
 import { writeContractYaml } from "../runtime/contract-io.ts";
 import { runFlow } from "../runtime/runner.ts";
+import { pauseFlowAPI } from "../runtime/flow-control.ts";
 import {
   defaultBackend,
   UnknownBackendError,
 } from "../adapters/select.ts";
 import type { AgentBackend } from "../adapters/backend.ts";
+import { emitPlanCreated } from "../gbrain/emit.ts";
+import { enqueueSnapshot, flushGbrain } from "../gbrain/client.ts";
+import { selectAdapter, type GbrainAdapter } from "../gbrain/adapter.ts";
+import { buildPlanCreated } from "../gbrain/snapshot.ts";
 
 const HELP = `gflow — orchestration system for coding agents
 
 Usage:
   gflow start "<goal>"   Begin a new flow from a user goal
   gflow status           Show status of the latest flow
+  gflow pause            Request pause at the next checkpoint
   gflow resume           Resume the latest non-complete flow (Phase 2 loop)
   gflow approve          Alias for resume — explicit "I reviewed the contract"
   gflow help             Show this help
@@ -30,7 +36,7 @@ Environment:
   GFLOW_TARGET_DIR       Worker sandbox dir (default: ../demo-target)
   GFLOW_TARGET_URL       URL for user-test validator (default: http://localhost:3000)
   GFLOW_ROOT             Runtime artifact root (default: ./.gflow)
-  GFLOW_BACKEND          planner/worker backend: claude-code (default) | codex | opencloud | none
+  GFLOW_BACKEND          planner/worker backend: claude-code (default) | codex | none
   GFLOW_CLAUDE_BIN       path to claude CLI (default: "claude")
   GFLOW_CODEX_BIN        path to codex CLI (default: "codex")
 `;
@@ -68,6 +74,13 @@ export async function cmdStart(goal: string, options: CmdStartOptions = {}): Pro
       });
       const contractPath = join(flowDir(flowId), "contract.yaml");
       await writeContractYaml(contract, contractPath);
+      emitPlanCreated({
+        flow_id: flowId,
+        goal,
+        contract,
+        target_dir: process.env.GFLOW_TARGET_DIR,
+        target_url: process.env.GFLOW_TARGET_URL,
+      });
       const featureCount = contract.milestones.reduce((s, m) => s + m.features.length, 0);
       const assertionCount = contract.milestones.reduce(
         (s, m) => s + m.features.reduce((t, f) => t + f.assertions.length, 0),
@@ -168,6 +181,17 @@ export async function cmdResume(options: CmdResumeOptions = {}): Promise<number>
   return r.status === "needs_human" ? 1 : 0;
 }
 
+export async function cmdPause(): Promise<number> {
+  try {
+    const r = await pauseFlowAPI({ reason: "requested from CLI" });
+    console.log(`gflow: ${r.status} ${r.flow_id}`);
+    return 0;
+  } catch (err) {
+    console.error(`gflow: pause failed: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+}
+
 async function fileExists(p: string): Promise<boolean> {
   try {
     await access(p);
@@ -175,6 +199,170 @@ async function fileExists(p: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+export async function cmdGbrain(args: string[]): Promise<number> {
+  const sub = args[0];
+  const rest = args.slice(1);
+  const adapter = selectAdapter();
+  switch (sub) {
+    case "health":
+      return cmdGbrainHealth(adapter, rest);
+    case "drain":
+      return cmdGbrainDrain(adapter, rest);
+    case "query":
+      return cmdGbrainQuery(adapter, rest);
+    case "seed-snapshot":
+      return cmdGbrainSeedSnapshot(rest);
+    case undefined:
+    case "help":
+    case "--help":
+    case "-h":
+      console.log("gflow gbrain — GBrain integration commands");
+      console.log("  gflow gbrain health [--json]");
+      console.log("  gflow gbrain drain [--flow=<id>]");
+      console.log('  gflow gbrain query "<q>" [--limit=N] [--json]');
+      console.log('  gflow gbrain seed-snapshot --kind=plan_created --flow=<id> [--goal=<g>]   (admin/smoke-test)');
+      return 0;
+    default:
+      console.error(`gflow gbrain: unknown subcommand "${sub}"`);
+      return 64;
+  }
+}
+
+async function cmdGbrainHealth(adapter: GbrainAdapter, args: string[]): Promise<number> {
+  const json = args.includes("--json");
+  const health = await adapter.health();
+  if (json) {
+    console.log(JSON.stringify(health, null, 2));
+  } else {
+    console.log(`mode:      ${health.mode}`);
+    console.log(`ok:        ${health.ok}`);
+    console.log(`reason:    ${health.reason}`);
+    console.log(`source:    ${health.source_id}`);
+    if (health.detail) console.log(`detail:    ${health.detail}`);
+    if (health.warnings.length > 0) {
+      console.log(`warnings:`);
+      for (const w of health.warnings) console.log(`  - ${w}`);
+    }
+    console.log(`checked:   ${health.checked_at}`);
+  }
+  if (
+    health.reason === "misconfigured" ||
+    health.reason === "unknown_mode"
+  ) {
+    return 64;
+  }
+  return health.ok ? 0 : 1;
+}
+
+async function cmdGbrainDrain(adapter: GbrainAdapter, args: string[]): Promise<number> {
+  const flowId = getFlag(args, "--flow") ?? undefined;
+  const result = await adapter.drainOutbox(flowId);
+  console.log(JSON.stringify(result, null, 2));
+  if (
+    result.errors.length === 1 &&
+    result.errors[0]?.message.startsWith("GBrain misconfigured:")
+  ) {
+    return 64;
+  }
+  return result.ok ? 0 : 1;
+}
+
+async function cmdGbrainQuery(adapter: GbrainAdapter, args: string[]): Promise<number> {
+  const json = args.includes("--json");
+  const limit = Number(getFlag(args, "--limit") ?? "5") || 5;
+  const positional = args.filter((a) => !a.startsWith("--"));
+  const q = positional.join(" ").trim();
+  if (!q) {
+    console.error('gflow gbrain query: missing query string. Usage: gflow gbrain query "<q>"');
+    return 64;
+  }
+  if (adapter.mode === "off") {
+    console.error("gflow gbrain query: mode is off; set GBRAIN_MODE=local-cli or mcp-http.");
+    return 1;
+  }
+  const result = await adapter.queryContext(q, { limit });
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+    return 0;
+  }
+  if (result.results.length === 0) {
+    console.log("(no results)");
+    return 0;
+  }
+  for (const r of result.results) {
+    console.log(`${r.slug}  (score=${r.score.toFixed(2)})`);
+    console.log(r.text.slice(0, 400));
+    console.log("---");
+  }
+  return 0;
+}
+
+async function cmdGbrainSeedSnapshot(args: string[]): Promise<number> {
+  const kind = getFlag(args, "--kind");
+  const flowId = getFlag(args, "--flow");
+  const goal = getFlag(args, "--goal") ?? "smoke-test goal";
+  if (kind !== "plan_created") {
+    console.error(`gflow gbrain seed-snapshot: only --kind=plan_created supported in V2`);
+    return 64;
+  }
+  if (!flowId) {
+    console.error("gflow gbrain seed-snapshot: --flow=<id> required");
+    return 64;
+  }
+  await ensureFlowDir(flowId);
+  // Synthetic minimal contract so buildPlanCreated has something to summarize.
+  const contract = {
+    flow_id: flowId,
+    goal,
+    created_at: new Date().toISOString(),
+    milestones: [
+      {
+        id: "M-001",
+        title: "Smoke milestone",
+        endpoint_criteria: "smoke test",
+        features: [
+          {
+            id: "F-001",
+            title: "Smoke feature",
+            spec: "Synthetic feature for the gbrain smoke test.",
+            assertions: [
+              {
+                id: "A-001-001",
+                text: "smoke assertion",
+                validator: "screwdriver" as const,
+                evidence_required: "n/a",
+                status: "pending" as const,
+                origin: "original" as const,
+                attempts: [],
+                check: { kind: "file_exists" as const, path: "index.html" },
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  const source_id = (process.env.GBRAIN_SOURCE_ID ?? "").trim() || "gflow";
+  enqueueSnapshot(
+    buildPlanCreated({
+      flow_id: flowId,
+      source_id,
+      goal,
+      contract,
+    }),
+  );
+  console.log(`gflow gbrain seed-snapshot: queued plan_created for ${flowId}`);
+  return 0;
+}
+
+function getFlag(args: string[], name: string): string | null {
+  for (const a of args) {
+    if (a === name) return "";
+    if (a.startsWith(name + "=")) return a.slice(name.length + 1);
+  }
+  return null;
 }
 
 export {
@@ -186,6 +374,15 @@ export {
 } from "../adapters/select.ts";
 
 export async function main(argv: string[]): Promise<number> {
+  try {
+    return await dispatch(argv);
+  } finally {
+    // MUST flush before process.exit — promise chains aren't durability.
+    await flushGbrain();
+  }
+}
+
+async function dispatch(argv: string[]): Promise<number> {
   const cmd = argv[0];
 
   switch (cmd) {
@@ -218,6 +415,10 @@ export async function main(argv: string[]): Promise<number> {
       }
       return cmdResume({ backend });
     }
+    case "pause":
+      return cmdPause();
+    case "gbrain":
+      return cmdGbrain(argv.slice(1));
     case "approve": {
       let backend: AgentBackend | null;
       try {

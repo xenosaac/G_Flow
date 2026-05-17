@@ -2,7 +2,6 @@ import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { defaultBackend, UnknownBackendError, main } from "../src/cli/index.ts";
 import { CodexBackend } from "../src/adapters/codex.ts";
 import { ClaudeCodeBackend } from "../src/adapters/claude-code.ts";
-import { OpenCloudBackend } from "../src/adapters/opencloud.ts";
 
 let prev: string | undefined;
 
@@ -36,10 +35,9 @@ describe("defaultBackend selection", () => {
     expect(b?.name).toBe("codex");
   });
 
-  test("'opencloud' → OpenCloudBackend (stub)", async () => {
+  test("'opencloud' is unsupported", async () => {
     process.env.GFLOW_BACKEND = "opencloud";
-    const b = await defaultBackend();
-    expect(b).toBeInstanceOf(OpenCloudBackend);
+    await expect(defaultBackend()).rejects.toThrow(UnknownBackendError);
   });
 
   test("'none' → null", async () => {

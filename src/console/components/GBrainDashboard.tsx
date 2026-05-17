@@ -3,29 +3,54 @@
 import { useEffect, useState } from "react";
 import type { FlowSnapshot } from "../lib/snapshot.ts";
 
+type GbrainMode = "off" | "local-cli" | "mcp-http";
+
 interface Entry {
-  kind: "feature_close" | "milestone_close" | "flow_complete";
+  kind: string;
   recorded_at: string;
   payload: Record<string, unknown>;
   file: string;
+  sync_state: "queued" | "synced" | "failed";
 }
 
 interface QueueResponse {
   flow_id: string | null;
+  mode: GbrainMode;
+  source_id: string;
+  health: {
+    ok: boolean;
+    reason: string;
+    detail?: string;
+    warnings: string[];
+    checked_at: string;
+  };
+  queue: { queued: number; synced: number; failed: number };
+  last_drain: { started_at: string; finished_at: string; drained: number; synced: number; failed: number } | null;
+  last_error: string | null;
   entries: Entry[];
-  counts: { feature_close: number; milestone_close: number; flow_complete: number };
 }
 
-const KIND_LABEL: Record<Entry["kind"], string> = {
+const MODE_COLOR: Record<GbrainMode, string> = {
+  off: "var(--text-dim)",
+  "local-cli": "var(--accent)",
+  "mcp-http": "var(--pass)",
+};
+
+const SYNC_COLOR: Record<Entry["sync_state"], string> = {
+  queued: "var(--warn)",
+  synced: "var(--pass)",
+  failed: "var(--fail)",
+};
+
+const KIND_LABEL: Record<string, string> = {
+  plan_created: "plan",
   feature_close: "feature",
   milestone_close: "milestone",
   flow_complete: "flow",
-};
-
-const KIND_COLOR: Record<Entry["kind"], string> = {
-  feature_close: "var(--accent)",
-  milestone_close: "var(--pass)",
-  flow_complete: "var(--warn)",
+  worker_handoff: "handoff",
+  validator_report: "validator",
+  steward_decision: "decision",
+  steward_triage: "triage",
 };
 
 export default function GBrainDashboard({ snapshot }: { snapshot: FlowSnapshot | null }) {
@@ -33,6 +58,8 @@ export default function GBrainDashboard({ snapshot }: { snapshot: FlowSnapshot |
   const isRunning = snapshot?.state.phase === "executing";
   const [data, setData] = useState<QueueResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [draining, setDraining] = useState(false);
+  const [drainMsg, setDrainMsg] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -62,84 +89,176 @@ export default function GBrainDashboard({ snapshot }: { snapshot: FlowSnapshot |
     };
   }, [flowId, isRunning]);
 
+  async function handleDrain() {
+    if (!data || data.mode === "off") return;
+    setDraining(true);
+    setDrainMsg(null);
+    try {
+      const r = await fetch("/api/gbrain/drain", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ flow_id: flowId }),
+      });
+      const result = await r.json();
+      if (result.ok) {
+        setDrainMsg(`drained ${result.synced}/${result.drained} (failed=${result.failed})`);
+      } else {
+        setDrainMsg(`drain failed: ${result.error ?? result.errors?.[0]?.message ?? "unknown"}`);
+      }
+    } catch (e) {
+      setDrainMsg(`drain error: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDraining(false);
+    }
+  }
+
   if (!data) {
     return (
-      <section className="panel">
+      <section className="panel" data-testid="gbrain-dashboard">
         <h2>GBrain Dashboard</h2>
-        <div className="empty">
-          {err ? `error: ${err}` : "loading snapshots…"}
-        </div>
-        <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 8 }}>
-          Local JSONL queue · real GBrain API integration is V2 (TODOS T5).
-        </div>
+        <div className="empty">{err ? `error: ${err}` : "loading…"}</div>
       </section>
     );
   }
 
-  const total = data.entries.length;
+  const mode = (data.mode ?? "off") as GbrainMode;
+  const source_id = data.source_id ?? "gflow";
+  const health = data.health ?? {
+    ok: true,
+    reason: "ok",
+    detail: undefined,
+    warnings: [] as string[],
+    checked_at: "",
+  };
+  const queue = data.queue ?? { queued: 0, synced: 0, failed: 0 };
+  const entries = data.entries ?? [];
+  const last_drain = data.last_drain ?? null;
+  const last_error = data.last_error ?? null;
+  const total = queue.queued + queue.synced + queue.failed;
+  const drainDisabled = draining || mode === "off";
+
   return (
-    <section className="panel">
-      <h2>
-        GBrain Dashboard
+    <section className="panel" data-testid="gbrain-dashboard">
+      <h2 style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span>GBrain Dashboard</span>
         <span
+          data-testid="gbrain-mode-badge"
           style={{
-            marginLeft: 8,
+            padding: "2px 8px",
+            borderRadius: 4,
+            fontSize: 10,
+            color: MODE_COLOR[mode],
+            border: `1px solid ${MODE_COLOR[mode]}`,
+            textTransform: "uppercase",
+            letterSpacing: 0.5,
+          }}
+        >
+          {mode}
+        </span>
+        <span
+          data-testid="gbrain-health-pill"
+          style={{
             fontSize: 11,
-            color: "var(--text-dim)",
+            color: health.ok ? "var(--pass)" : "var(--fail)",
             fontWeight: 400,
             textTransform: "none",
             letterSpacing: 0,
           }}
+          title={health.detail ?? ""}
         >
-          {total} snapshot{total === 1 ? "" : "s"} queued
+          {health.ok ? "● ok" : `● ${health.reason}`}
         </span>
+        <button
+          data-testid="gbrain-drain-button"
+          onClick={handleDrain}
+          disabled={drainDisabled}
+          style={{
+            marginLeft: "auto",
+            fontSize: 11,
+            padding: "4px 10px",
+            opacity: drainDisabled ? 0.4 : 1,
+            cursor: drainDisabled ? "not-allowed" : "pointer",
+            background: "var(--bg-elev)",
+            border: "1px solid var(--border)",
+            borderRadius: 4,
+            color: "var(--text)",
+          }}
+          title={mode === "off" ? "Set GBRAIN_MODE=local-cli or mcp-http to enable" : "Drain queued snapshots into GBrain"}
+        >
+          {draining ? "draining…" : "Drain now"}
+        </button>
       </h2>
+
       <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
-        {(["feature_close", "milestone_close", "flow_complete"] as const).map((k) => (
-          <div
-            key={k}
-            style={{
-              padding: "4px 10px",
-              border: `1px solid var(--border)`,
-              borderRadius: 999,
-              fontSize: 11,
-              color: KIND_COLOR[k],
-              background: "var(--bg-elev)",
-            }}
-          >
-            <strong style={{ color: "var(--text)" }}>{data.counts[k]}</strong> · {KIND_LABEL[k]}
-          </div>
-        ))}
+        <StatChip count={queue.queued} label="queued" color={SYNC_COLOR.queued} />
+        <StatChip count={queue.synced} label="synced" color={SYNC_COLOR.synced} />
+        <StatChip count={queue.failed} label="failed" color={SYNC_COLOR.failed} />
+        <span
+          style={{
+            padding: "4px 10px",
+            fontSize: 11,
+            color: "var(--text-dim)",
+          }}
+        >
+          last drain: {last_drain ? formatRelativeTime(last_drain.finished_at) : "—"}
+        </span>
+        {drainMsg ? (
+          <span style={{ fontSize: 11, color: "var(--text-dim)" }} data-testid="gbrain-drain-msg">
+            {drainMsg}
+          </span>
+        ) : null}
       </div>
 
-      {data.entries.length === 0 ? (
+      {health.warnings.length > 0 ? (
+        <div
+          style={{
+            marginBottom: 12,
+            padding: 8,
+            background: "rgba(251, 191, 36, 0.10)",
+            border: "1px solid var(--warn)",
+            borderRadius: 4,
+            fontSize: 11,
+            color: "var(--warn)",
+          }}
+        >
+          {health.warnings.map((w, i) => (
+            <div key={i}>⚠ {w}</div>
+          ))}
+        </div>
+      ) : null}
+
+      {entries.length === 0 ? (
         <div className="empty">No snapshots queued for this flow yet.</div>
       ) : (
         <ul style={{ listStyle: "none", display: "flex", flexDirection: "column", gap: 4 }}>
-          {data.entries.slice(0, 10).map((e, i) => {
+          {entries.slice(0, 10).map((e, i) => {
             const time = formatTime(e.recorded_at);
             const subject =
               (e.payload.feature_id as string | undefined) ??
               (e.payload.milestone_id as string | undefined) ??
+              (e.payload.goal as string | undefined)?.slice(0, 40) ??
               "—";
             return (
               <li
-                key={i}
+                key={`${e.file}-${i}`}
                 style={{
                   display: "flex",
                   gap: 8,
                   padding: "4px 8px",
-                  borderLeft: `2px solid ${KIND_COLOR[e.kind]}`,
+                  borderLeft: `2px solid ${SYNC_COLOR[e.sync_state]}`,
                   background: "var(--bg)",
                   borderRadius: 4,
                   fontSize: 12,
                 }}
               >
                 <code style={{ color: "var(--text-dim)", fontSize: 11 }}>{time}</code>
-                <span style={{ color: KIND_COLOR[e.kind], fontWeight: 600 }}>
-                  {KIND_LABEL[e.kind]}
+                <span style={{ color: SYNC_COLOR[e.sync_state], fontWeight: 600 }}>
+                  {KIND_LABEL[e.kind] ?? e.kind}
                 </span>
                 <code>{subject}</code>
+                <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>
+                  {e.sync_state}
+                </span>
               </li>
             );
           })}
@@ -147,10 +266,31 @@ export default function GBrainDashboard({ snapshot }: { snapshot: FlowSnapshot |
       )}
 
       <div style={{ fontSize: 11, color: "var(--text-dim)", marginTop: 12 }}>
-        Reading <code>.gflow/{flowId ?? "&lt;flow&gt;"}/gbrain-queue/*.jsonl</code> · refresh every{" "}
-        {isRunning ? "2s" : "8s"} · real GBrain API integration is V2 (TODOS T5).
+        Mode: <strong>{mode}</strong> · Source: <code>{source_id}</code> · {total} snapshot{total === 1 ? "" : "s"} tracked
+        {last_error ? (
+          <span style={{ color: "var(--fail)" }}> · last error: {last_error}</span>
+        ) : (
+          <span> · last error: —</span>
+        )}
       </div>
     </section>
+  );
+}
+
+function StatChip({ count, label, color }: { count: number; label: string; color: string }) {
+  return (
+    <div
+      style={{
+        padding: "4px 10px",
+        border: `1px solid var(--border)`,
+        borderRadius: 999,
+        fontSize: 11,
+        color,
+        background: "var(--bg-elev)",
+      }}
+    >
+      <strong style={{ color: "var(--text)" }}>{count}</strong> · {label}
+    </div>
   );
 }
 
@@ -161,5 +301,19 @@ function formatTime(iso: string): string {
     return d.toLocaleTimeString(undefined, { hour12: false });
   } catch {
     return iso.slice(11, 19);
+  }
+}
+
+function formatRelativeTime(iso: string): string {
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "—";
+    const diff = Date.now() - d.getTime();
+    if (diff < 60_000) return "just now";
+    if (diff < 3600_000) return `${Math.floor(diff / 60_000)}m ago`;
+    if (diff < 86400_000) return `${Math.floor(diff / 3600_000)}h ago`;
+    return d.toLocaleString();
+  } catch {
+    return "—";
   }
 }

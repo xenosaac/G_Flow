@@ -4,7 +4,7 @@ import { selectBackend, UnknownBackendError } from "../../../../adapters/select.
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
-  let body: { session_id?: string; backend?: string; message?: string };
+  let body: { session_id?: string; backend?: string; message?: string; flow_id?: string };
   try {
     body = await req.json();
   } catch {
@@ -37,6 +37,7 @@ export async function POST(req: Request) {
       session_id: sessionId,
       backend,
       message,
+      flow_id: body.flow_id,
       cwd: process.cwd(),
     });
     return Response.json({

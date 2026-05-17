@@ -12,11 +12,10 @@
 #   1. mktemp -d for GFLOW_ROOT and GFLOW_TARGET_DIR (no repo pollution).
 #   2. git-inits the target so the worker can commit.
 #   3. Runs `gflow start "<goal>"` (Phase 1: Planner produces contract.yaml).
-#   4. Runs `gflow resume` (Phase 2: real Worker, Screwdriver, UserTest,
-#      Steward — UserTest uses G_FLOW_USERTEST_FAKE=pass when browser-use is
-#      not installed so the demo doesn't tool_error on infra).
-#   5. Runs `bun scripts/click-verify.ts <target>/index.html` to prove the
-#      generated UI actually works.
+#   4. Runs `gflow resume` (Phase 2: real Worker, Screwdriver, deterministic
+#      Playwright UserTest, Steward).
+#   5. Runs the Playwright UserTest runner directly against the generated
+#      static file to prove the UI actually works in Chromium.
 #
 # Preserves the temp dirs on exit so artifacts can be inspected.
 
@@ -39,12 +38,14 @@ echo
   git init -q
   git config user.email "gflow@local"
   git config user.name "G_Flow E2E"
+  touch .gitkeep
+  git add .gitkeep
+  git commit -qm "initial target"
 )
 
 export GFLOW_ROOT="$TMP_ROOT"
 export GFLOW_TARGET_DIR="$TMP_TARGET"
 export GFLOW_BACKEND="$BACKEND"
-export G_FLOW_USERTEST_FAKE="${G_FLOW_USERTEST_FAKE:-pass}"
 
 GFLOW_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$GFLOW_DIR"
@@ -64,7 +65,7 @@ echo "  ... (truncated)"
 echo
 
 echo "[e2e-real] Phase 2 — Orchestrator"
-bun bin/gflow resume || true
+bun bin/gflow resume
 
 echo
 echo "[e2e-real] State:"
@@ -73,8 +74,32 @@ bun bin/gflow status || true
 echo
 if [ -f "$TMP_TARGET/index.html" ]; then
   echo "[e2e-real] index.html generated ($(wc -c < "$TMP_TARGET/index.html") bytes)"
-  echo "[e2e-real] Browser-click verification:"
-  bun scripts/click-verify.ts "$TMP_TARGET/index.html"
+  echo "[e2e-real] Playwright browser verification:"
+  (
+    cd "$TMP_TARGET"
+    cat <<'JSON' | bun "$GFLOW_DIR/src/runtime/validators/playwright-user-test.ts"
+{
+  "target_url": "http://localhost:3000",
+  "assertions": [
+    {
+      "id": "A-E2E-001",
+      "text": "Typing Buy milk and clicking Add Todo appends Buy milk",
+      "evidence_required": "Chromium DOM observation",
+      "user_check": {
+        "kind": "browser_flow",
+        "start": "file",
+        "path": "index.html",
+        "steps": [
+          { "kind": "fill", "selector": "#todo-input", "value": "Buy milk" },
+          { "kind": "click", "selector": "#add-todo" },
+          { "kind": "expect_text", "selector": "#todo-list", "text": "Buy milk" }
+        ]
+      }
+    }
+  ]
+}
+JSON
+  )
   echo
   echo "[e2e-real] DONE. Artifacts preserved:"
   echo "  $TMP_ROOT/$LATEST"

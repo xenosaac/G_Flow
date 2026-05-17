@@ -55,7 +55,93 @@ export const AssertionCheck = z.discriminatedUnion("kind", [
 ]);
 export type AssertionCheckT = z.infer<typeof AssertionCheck>;
 
-export const Assertion = z.object({
+export const BrowserGotoStep = z.object({
+  kind: z.literal("goto"),
+  path: z.string().min(1),
+});
+export const BrowserFillStep = z.object({
+  kind: z.literal("fill"),
+  selector: z.string().min(1),
+  value: z.string(),
+});
+export const BrowserClickStep = z.object({
+  kind: z.literal("click"),
+  selector: z.string().min(1),
+});
+export const BrowserPressStep = z.object({
+  kind: z.literal("press"),
+  selector: z.string().min(1),
+  key: z.string().min(1),
+});
+export const BrowserExpectTextStep = z.object({
+  kind: z.literal("expect_text"),
+  selector: z.string().min(1),
+  text: z.string(),
+});
+export const BrowserExpectValueStep = z.object({
+  kind: z.literal("expect_value"),
+  selector: z.string().min(1),
+  value: z.string(),
+});
+export const BrowserExpectUrlStep = z.object({
+  kind: z.literal("expect_url"),
+  contains: z.string().min(1),
+});
+export const BrowserExpectCountStep = z.object({
+  kind: z.literal("expect_count"),
+  selector: z.string().min(1),
+  count: z.number().int().nonnegative(),
+});
+
+export const BrowserStep = z.discriminatedUnion("kind", [
+  BrowserGotoStep,
+  BrowserFillStep,
+  BrowserClickStep,
+  BrowserPressStep,
+  BrowserExpectTextStep,
+  BrowserExpectValueStep,
+  BrowserExpectUrlStep,
+  BrowserExpectCountStep,
+]);
+export type BrowserStepT = z.infer<typeof BrowserStep>;
+
+export const UserCheck = z
+  .object({
+    kind: z.literal("browser_flow"),
+    start: z.enum(["target_url", "file"]),
+    path: z.string().min(1).optional(),
+    steps: z.array(BrowserStep).min(1),
+    timeout_ms: z.number().int().positive().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.start === "file") {
+      if (!value.path) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["path"],
+          message: "path is required when start=file",
+        });
+      } else if (!isSafeRelativePath(value.path)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["path"],
+          message: "file path must be relative to target_dir and must not contain '..'",
+        });
+      }
+    }
+    for (const [idx, step] of value.steps.entries()) {
+      if (step.kind === "goto" && !isSafeRelativeRoute(step.path)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["steps", idx, "path"],
+          message: "goto.path must be relative to target_url and must not navigate externally",
+        });
+      }
+    }
+  });
+export type UserCheckT = z.infer<typeof UserCheck>;
+
+const AssertionBase = z.object({
   id: z.string().min(1),
   text: z.string().min(1),
   validator: ValidatorKind,
@@ -64,6 +150,42 @@ export const Assertion = z.object({
   origin: AssertionOrigin.default("original"),
   attempts: z.array(AssertionAttempt).default([]),
   check: AssertionCheck.optional(),
+  user_check: UserCheck.optional(),
+});
+
+export const Assertion = AssertionBase.superRefine((value, ctx) => {
+  if (value.validator === "screwdriver") {
+    if (!value.check) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["check"],
+        message: "screwdriver assertions require check",
+      });
+    }
+    if (value.user_check) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["user_check"],
+        message: "screwdriver assertions must not include user_check",
+      });
+    }
+  }
+  if (value.validator === "user-test") {
+    if (!value.user_check) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["user_check"],
+        message: "user-test assertions require user_check",
+      });
+    }
+    if (value.check) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["check"],
+        message: "user-test assertions must not include check",
+      });
+    }
+  }
 });
 export type AssertionT = z.infer<typeof Assertion>;
 
@@ -91,3 +213,19 @@ export const Contract = z.object({
   milestones: z.array(Milestone).min(1),
 });
 export type ContractT = z.infer<typeof Contract>;
+
+export function isSafeRelativePath(path: string): boolean {
+  if (!path || path.startsWith("/") || path.startsWith("\\") || /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(path)) {
+    return false;
+  }
+  const parts = path.split(/[\\/]+/);
+  return !parts.some((part) => part === "..");
+}
+
+export function isSafeRelativeRoute(path: string): boolean {
+  if (!path || path.startsWith("//") || path.startsWith("\\") || /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(path)) {
+    return false;
+  }
+  const parts = path.split(/[\\/]+/);
+  return !parts.some((part) => part === "..");
+}

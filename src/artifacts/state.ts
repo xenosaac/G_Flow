@@ -1,6 +1,13 @@
 import { z } from "zod";
 
-export const FlowPhase = z.enum(["planning", "executing", "needs_human", "complete"]);
+export const FlowPhase = z.enum([
+  "clarifying",
+  "planning",
+  "executing",
+  "paused",
+  "needs_human",
+  "complete",
+]);
 export type FlowPhaseT = z.infer<typeof FlowPhase>;
 
 export const FlowStep = z.enum([

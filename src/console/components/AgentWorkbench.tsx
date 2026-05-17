@@ -18,8 +18,8 @@ interface TranscriptEntry {
 }
 
 const ROLE_LABEL: Record<TranscriptEntry["role"], string> = {
-  user: "you   ",
-  assistant: "agent ",
+  user: "You",
+  assistant: "Agent",
   system: "system",
 };
 
@@ -31,15 +31,21 @@ const SEED_BANNER: TranscriptEntry = {
 
 export default function AgentWorkbench({
   snapshot,
+  onNewChat,
+  onDemoLoaded,
 }: {
   snapshot: FlowSnapshot | null;
+  onNewChat?: () => void;
+  onDemoLoaded?: (snapshot: FlowSnapshot) => void;
 }) {
   const [backends, setBackends] = useState<BackendInfo[]>([]);
   const [selectedBackend, setSelectedBackend] = useState<string>("");
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([SEED_BANNER]);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [input, setInput] = useState("");
-  const [busy, setBusy] = useState<"" | "starting" | "replanning" | "accepting" | "chatting">("");
+  const [busy, setBusy] = useState<
+    "" | "starting" | "clarifying" | "replanning" | "accepting" | "pausing" | "chatting" | "demoing"
+  >("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -79,6 +85,7 @@ export default function AgentWorkbench({
     setTranscript([{ ...SEED_BANNER, ts: nowISO() }]);
     setSessionId(null);
     setInput("");
+    onNewChat?.();
   }
 
   function clarificationsFromTranscript(latest: string): string {
@@ -96,7 +103,20 @@ export default function AgentWorkbench({
       : "no contract yet";
     const line1 = `Flow ${snap.flow_id} · phase=${s.phase} · M=${s.current_milestone ?? "—"} · F=${s.current_feature ?? "—"} · step=${s.current_step ?? "—"}`;
     const hr = s.phase === "needs_human" && snap.needs_human_reason ? `\n⚠ ${snap.needs_human_reason}` : "";
-    return `${line1}\n${counts}${hr}`;
+    const questions =
+      s.phase === "clarifying" && snap.clarification_questions.length
+        ? `\nQuestions:\n${snap.clarification_questions.map((q) => `- ${q.id}: ${q.text}`).join("\n")}`
+        : "";
+    return `${line1}\n${counts}${questions}${hr}`;
+  }
+
+  function formatQuestions(
+    questions: { id: string; text: string; why?: string }[],
+  ): string {
+    if (!questions.length) return "(no questions returned)";
+    return questions
+      .map((q) => `- ${q.id}: ${q.text}${q.why ? `\n  why: ${q.why}` : ""}`)
+      .join("\n");
   }
 
   async function acceptPlan() {
@@ -122,6 +142,77 @@ export default function AgentWorkbench({
       push({
         role: "system",
         content: `accept failed: ${e instanceof Error ? e.message : String(e)}`,
+        ts: nowISO(),
+        ok: false,
+      });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function pauseFlow() {
+    if (busy || !snapshot) return;
+    setBusy("pausing");
+    try {
+      const r = await fetch("/api/flows/pause", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          flow_id: snapshot.flow_id,
+          reason: "requested from Workbench",
+        }),
+      });
+      const d = await r.json();
+      const ok = !!d.ok && r.ok;
+      push({
+        role: "system",
+        content: ok
+          ? `Pause requested. Flow ${d.flow_id} → ${d.status}.`
+          : `pause failed: ${d.error ?? `HTTP ${r.status}`}`,
+        ts: nowISO(),
+        ok,
+      });
+    } catch (e) {
+      push({
+        role: "system",
+        content: `pause failed: ${e instanceof Error ? e.message : String(e)}`,
+        ts: nowISO(),
+        ok: false,
+      });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function runCollegeDemo() {
+    if (busy) return;
+    setBusy("demoing");
+    try {
+      const r = await fetch("/api/demo/college-website", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+      });
+      const d = await r.json();
+      const ok = !!d.ok && r.ok;
+      if (ok && d.snapshot) {
+        onDemoLoaded?.(d.snapshot as FlowSnapshot);
+      }
+      push({
+        role: "system",
+        content: ok
+          ? [
+              `College website demo loaded · flow ${d.flow_id}.`,
+              `${d.milestones}M / ${d.features}F / ${d.assertions}A · target: ${d.target_dir}`,
+              "Planner artifacts, validator reports, and GBrain snapshots are now visible in the panels.",
+            ].join("\n")
+          : `demo failed: ${d.error ?? `HTTP ${r.status}`}`,
+        ts: nowISO(),
+        ok,
+      });
+    } catch (e) {
+      push({
+        role: "system",
+        content: `demo failed: ${e instanceof Error ? e.message : String(e)}`,
         ts: nowISO(),
         ok: false,
       });
@@ -174,6 +265,10 @@ export default function AgentWorkbench({
       await acceptPlan();
       return;
     }
+    if (cmd.kind === "pause") {
+      await pauseFlow();
+      return;
+    }
     if (cmd.kind === "start") {
       await runStart(cmd.goal);
       return;
@@ -185,6 +280,10 @@ export default function AgentWorkbench({
     if (!snapshot) {
       // First message ever → start a flow with this as the goal
       await runStart(cmd.text);
+      return;
+    }
+    if (phase === "clarifying") {
+      await runClarify(cmd.text);
       return;
     }
     if (phase === "planning") {
@@ -213,8 +312,10 @@ export default function AgentWorkbench({
       const ok = !!d.ok && r.ok;
       push({
         role: "system",
-        content: ok
-          ? `Plan v1 ready · flow ${d.flow_id} · ${d.milestones}M / ${d.features}F / ${d.assertions}A.\nReview the Executor panel on the right, refine in chat, or click Accept Plan.`
+        content: ok && d.status === "needs_clarification"
+          ? `Clarification needed · flow ${d.flow_id}.\n${formatQuestions(d.questions ?? [])}`
+          : ok
+            ? `Plan v1 ready · flow ${d.flow_id} · ${d.milestones}M / ${d.features}F / ${d.assertions}A.\nReview the Plan panel on the right, refine in chat, or click Accept Plan.`
           : `start failed: ${d.error ?? `HTTP ${r.status}`}${
               (d.issues as string[] | undefined)?.length ? "\n• " + (d.issues as string[]).join("\n• ") : ""
             }`,
@@ -225,6 +326,51 @@ export default function AgentWorkbench({
       push({
         role: "system",
         content: `start failed: ${e instanceof Error ? e.message : String(e)}`,
+        ts: nowISO(),
+        ok: false,
+      });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function runClarify(answer: string) {
+    if (!snapshot) return;
+    setBusy("clarifying");
+    const questions = snapshot.clarification_questions.length
+      ? snapshot.clarification_questions
+      : [{ id: "freeform", text: "Clarification", why: "" }];
+    try {
+      const r = await fetch("/api/flows/clarify", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          flow_id: snapshot.flow_id,
+          backend: selectedBackend,
+          answers: questions.map((q) => ({
+            question_id: q.id,
+            answer,
+          })),
+        }),
+      });
+      const d = await r.json();
+      const ok = !!d.ok && r.ok;
+      push({
+        role: "system",
+        content: ok && d.status === "needs_clarification"
+          ? `More clarification needed.\n${formatQuestions(d.questions ?? [])}`
+          : ok
+            ? `Plan ready · ${d.milestones}M / ${d.features}F / ${d.assertions}A.\nReview the Plan panel on the right, refine in chat, or click Accept Plan.`
+            : `clarify failed: ${d.error ?? `HTTP ${r.status}`}${
+                (d.issues as string[] | undefined)?.length ? "\n• " + (d.issues as string[]).join("\n• ") : ""
+              }`,
+        ts: nowISO(),
+        ok,
+      });
+    } catch (e) {
+      push({
+        role: "system",
+        content: `clarify failed: ${e instanceof Error ? e.message : String(e)}`,
         ts: nowISO(),
         ok: false,
       });
@@ -279,6 +425,7 @@ export default function AgentWorkbench({
         body: JSON.stringify({
           session_id: sessionId,
           backend: selectedBackend,
+          flow_id: snapshot?.flow_id,
           message,
         }),
       });
@@ -317,19 +464,67 @@ export default function AgentWorkbench({
     }
     return "Plan Accepted";
   })();
+  const phase = snapshot?.state.phase ?? "idle";
+  const primaryLabel = busy
+    ? busy === "starting"
+      ? "Starting…"
+      : busy === "clarifying"
+        ? "Answering…"
+      : busy === "replanning"
+        ? "Refining…"
+      : busy === "pausing"
+        ? "Pausing…"
+      : busy === "demoing"
+        ? "Loading demo…"
+      : busy === "chatting"
+        ? "Sending…"
+        : "Working…"
+    : !snapshot
+      ? "Start Flow"
+      : phase === "clarifying"
+        ? "Answer"
+      : phase === "planning"
+        ? "Refine Plan"
+        : "Send";
+  const modeLabel =
+    phase === "clarifying"
+      ? "Clarifying"
+      : phase === "planning"
+      ? "Plan mode"
+      : phase === "executing"
+        ? "Execution"
+        : phase === "paused"
+          ? "Paused"
+        : phase === "needs_human"
+          ? "Needs review"
+          : phase === "complete"
+            ? "Complete"
+            : "Ready";
 
   return (
-    <section className="panel" data-testid="agent-workbench">
+    <section className="panel workbench-panel" data-testid="agent-workbench">
       <div className="workbench-header">
-        <h2 style={{ marginRight: 12 }}>Workbench</h2>
+        <div className="panel-title-block">
+          <h2>Agent Workbench</h2>
+          <span className={`mode-chip mode-${phase}`}>{modeLabel}</span>
+        </div>
         <button
           type="button"
           onClick={resetChat}
           disabled={!!busy}
-          className="btn"
+          className="btn ghost"
           data-testid="workbench-new-chat"
         >
           + New Chat
+        </button>
+        <button
+          type="button"
+          onClick={() => void runCollegeDemo()}
+          disabled={!!busy}
+          className="btn ghost"
+          data-testid="workbench-college-demo"
+        >
+          College Demo
         </button>
         <button
           type="button"
@@ -340,95 +535,72 @@ export default function AgentWorkbench({
         >
           {busy === "accepting" ? "Accepting…" : acceptLabel}
         </button>
-        <span className="grow" />
-        <label style={{ fontSize: 11, color: "var(--text-dim)", alignSelf: "center" }}>
-          Backend
-        </label>
-        <select
-          value={selectedBackend}
-          onChange={(e) => setSelectedBackend(e.target.value)}
-          disabled={!!busy}
-          data-testid="backend-select"
-          style={{
-            background: "var(--bg-elev)",
-            color: "var(--text)",
-            padding: "4px 8px",
-            border: "1px solid var(--border)",
-            borderRadius: 4,
-          }}
-        >
-          {backends.map((b) => (
-            <option key={b.name} value={b.name} disabled={!b.available}>
-              {b.name}
-              {!b.available ? ` (${b.note ?? "unavailable"})` : ""}
-            </option>
-          ))}
-        </select>
-        <span
-          style={{
-            fontSize: 11,
-            color: busy ? "var(--warn)" : "var(--text-dim)",
-            alignSelf: "center",
-            minWidth: 80,
-            textAlign: "right",
-          }}
-        >
-          {busy ? `● ${busy}…` : "● idle"}
-        </span>
+        {snapshot?.state.phase === "executing" || snapshot?.state.phase === "paused" ? (
+          <button
+            type="button"
+            onClick={() =>
+              snapshot?.state.phase === "paused"
+                ? void acceptPlan()
+                : void pauseFlow()
+            }
+            disabled={!!busy}
+            className="btn ghost"
+            data-testid="workbench-pause"
+          >
+            {snapshot?.state.phase === "paused"
+              ? busy === "accepting"
+                ? "Resuming…"
+                : "Resume"
+              : busy === "pausing"
+                ? "Pausing…"
+                : "Pause"}
+          </button>
+        ) : null}
+        <div className="workbench-spacer" />
+        <div className="backend-controls">
+          <label className="select-label" htmlFor="backend-select">
+            Backend
+          </label>
+          <select
+            id="backend-select"
+            value={selectedBackend}
+            onChange={(e) => setSelectedBackend(e.target.value)}
+            disabled={!!busy}
+            data-testid="backend-select"
+            className="select-control"
+          >
+            {backends.map((b) => (
+              <option key={b.name} value={b.name} disabled={!b.available}>
+                {b.name}
+                {!b.available ? ` (${b.note ?? "unavailable"})` : ""}
+              </option>
+            ))}
+          </select>
+          <span className={`run-state ${busy ? "active" : ""}`}>
+            <span className="state-dot" />
+            {busy || "idle"}
+          </span>
+        </div>
       </div>
 
       <div
         ref={scrollRef}
         data-testid="workbench-transcript"
-        style={{
-          maxHeight: 420,
-          minHeight: 200,
-          overflowY: "auto",
-          marginBottom: 12,
-          background: "var(--bg)",
-          border: "1px solid var(--border)",
-          borderRadius: 4,
-          padding: 12,
-          fontSize: 12,
-        }}
+        className="transcript"
       >
         {transcript.map((m, i) => (
           <div
             key={i}
-            style={{
-              marginBottom: 8,
-              paddingLeft: 8,
-              borderLeft: `2px solid ${
-                m.ok === false
-                  ? "var(--fail)"
-                  : m.role === "user"
-                    ? "var(--accent)"
-                    : m.role === "assistant"
-                      ? "var(--pass)"
-                      : "var(--border)"
-              }`,
-            }}
+            className={[
+              "transcript-entry",
+              `entry-${m.role}`,
+              m.ok === false ? "entry-error" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
           >
-            <div
-              style={{
-                fontSize: 10,
-                color: "var(--text-dim)",
-                letterSpacing: "0.05em",
-                marginBottom: 2,
-                textTransform: "uppercase",
-              }}
-            >
-              [{ROLE_LABEL[m.role]}]
-            </div>
-            <pre
-              style={{
-                whiteSpace: "pre-wrap",
-                fontFamily: "inherit",
-                fontSize: 12,
-                margin: 0,
-                color: m.ok === false ? "var(--fail)" : "var(--text)",
-              }}
-            >
+            <div className="entry-label">{ROLE_LABEL[m.role]}</div>
+            <pre className="entry-body">
               {m.content}
             </pre>
           </div>
@@ -449,34 +621,23 @@ export default function AgentWorkbench({
         placeholder={
           !snapshot
             ? "> describe what you want to build, then Cmd/Ctrl+Enter to send"
+            : snapshot.state.phase === "clarifying"
+              ? "> answer the clarification questions above"
             : snapshot.state.phase === "planning"
               ? "> refine the plan — every message rewrites the contract until you Accept"
+              : snapshot.state.phase === "paused"
+                ? "> flow is paused; ask a question or click Resume"
               : "> ask the agent anything; Phase 2 is running"
         }
         data-testid="workbench-input"
-        style={{
-          width: "100%",
-          padding: 10,
-          background: "var(--bg-elev)",
-          color: "var(--text)",
-          border: "1px solid var(--border)",
-          borderRadius: 4,
-          fontFamily: "inherit",
-          fontSize: 13,
-          resize: "vertical",
-        }}
+        className="workbench-input"
       />
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginTop: 6,
-        }}
-      >
-        <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+      <div className="workbench-footer">
+        <span className="workbench-hint">
           {snapshot?.state.phase === "planning"
             ? "Plan Mode · every message rewrites the contract"
+            : snapshot?.state.phase === "clarifying"
+              ? "Clarifying · answer in chat to create the plan"
             : snapshot?.state.phase === "executing"
               ? "Executing · messages route to /api/chat"
               : "Cmd/Ctrl+Enter sends · /help for commands"}
@@ -488,7 +649,7 @@ export default function AgentWorkbench({
           data-testid="workbench-send"
           className="btn primary"
         >
-          {busy ? "working…" : "send"}
+          {primaryLabel}
         </button>
       </div>
     </section>

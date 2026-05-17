@@ -15,8 +15,8 @@ const STEP_TO_BLOCK: Record<FlowStepT, "screwdriver" | "usertest" | "triage" | n
 export default function ValidatorPanel({ snapshot }: { snapshot: FlowSnapshot | null }) {
   if (!snapshot) {
     return (
-      <section className="panel">
-        <h2>Validator</h2>
+      <section className="panel validator-panel">
+        <h2>Validation</h2>
         <div className="empty">No validator activity yet.</div>
       </section>
     );
@@ -24,8 +24,8 @@ export default function ValidatorPanel({ snapshot }: { snapshot: FlowSnapshot | 
   const { screwdriver, usertest, triage } = snapshot.latest;
   if (!screwdriver && !usertest && !triage) {
     return (
-      <section className="panel">
-        <h2>Validator</h2>
+      <section className="panel validator-panel">
+        <h2>Validation</h2>
         <div className="empty">No validator reports yet for the current feature.</div>
       </section>
     );
@@ -36,8 +36,11 @@ export default function ValidatorPanel({ snapshot }: { snapshot: FlowSnapshot | 
   const activeBlock = step ? STEP_TO_BLOCK[step] : null;
 
   return (
-    <section className="panel">
-      <h2>Validator</h2>
+    <section className="panel validator-panel">
+      <div className="panel-heading compact">
+        <h2>Validation</h2>
+        <span className="panel-subtitle">{snapshot.state.current_feature ?? "—"}</span>
+      </div>
       {screwdriver ? (
         <ValidatorBlock
           report={screwdriver}
@@ -69,7 +72,7 @@ export default function ValidatorPanel({ snapshot }: { snapshot: FlowSnapshot | 
             <span>Steward triage</span>
             <span>{triage.classification}</span>
           </div>
-          <div style={{ fontSize: 12, color: "var(--text-dim)" }}>{triage.rationale}</div>
+          <div className="validator-detail">{triage.rationale}</div>
         </div>
       ) : null}
     </section>
@@ -95,20 +98,11 @@ function ValidatorBlock({
       <div className="v-header">
         <span>
           {label}{" "}
-          <span style={{ color: "var(--text-dim)", fontWeight: 400 }}>
+          <span className="validator-name">
             ({report.validator})
           </span>
         </span>
-        <span
-          style={{
-            color:
-              report.status === "pass"
-                ? "var(--pass)"
-                : report.status === "fail"
-                  ? "var(--fail)"
-                  : "var(--warn)",
-          }}
-        >
+        <span className={`validator-status ${report.status}`}>
           {report.status.toUpperCase()}
           {report.steward_hint !== "NONE" ? ` · hint=${report.steward_hint}` : ""}
         </span>
@@ -123,17 +117,7 @@ function ValidatorBlock({
         ))}
       </ul>
       {report.status === "tool_error" ? (
-        <pre
-          style={{
-            marginTop: 8,
-            padding: 8,
-            background: "var(--bg)",
-            borderRadius: 4,
-            fontSize: 11,
-            overflowX: "auto",
-            color: "var(--warn)",
-          }}
-        >
+        <pre className="stderr-tail">
           {report.raw_stderr_tail.slice(0, 800)}
         </pre>
       ) : null}

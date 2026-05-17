@@ -1,19 +1,9 @@
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdir, rm, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 import { runUserTest, writeUserTestReport } from "../src/runtime/validators/user-test.ts";
 import type { FeatureT } from "../src/artifacts/contract.ts";
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const PY_RUNNER = join(HERE, "..", "scripts", "user_test_runner.py");
-const PROVIDER_KEYS = [
-  "BROWSER_USE_API_KEY",
-  "OPENAI_API_KEY",
-  "ANTHROPIC_API_KEY",
-  "GOOGLE_API_KEY",
-];
 
 const feature: FeatureT = {
   id: "F-001",
@@ -34,6 +24,11 @@ const feature: FeatureT = {
       text: "Form redirects to /dashboard",
       validator: "user-test",
       evidence_required: "screenshot",
+      user_check: {
+        kind: "browser_flow",
+        start: "target_url",
+        steps: [{ kind: "expect_url", contains: "localhost" }],
+      },
       status: "pending",
       origin: "original",
       attempts: [],
@@ -43,6 +38,11 @@ const feature: FeatureT = {
       text: "Dashboard shows username",
       validator: "user-test",
       evidence_required: "screenshot",
+      user_check: {
+        kind: "browser_flow",
+        start: "target_url",
+        steps: [{ kind: "expect_url", contains: "localhost" }],
+      },
       status: "pending",
       origin: "original",
       attempts: [],
@@ -111,7 +111,7 @@ describe("G2: user-test subprocess outcome → report.status", () => {
       runner: async () => ({
         exitCode: 3,
         stdout: "",
-        stderr: "browser-use not importable: No module named 'browser_use'",
+        stderr: "Playwright not importable: Cannot find module 'playwright'",
         timedOut: false,
       }),
     });
@@ -233,7 +233,7 @@ describe("G2: user-test subprocess outcome → report.status", () => {
   });
 
   test("G2: assertion-level tool_error escalates whole report to tool_error/INFRA", async () => {
-    // browser-use installed, exited 0, returned JSON, but the runner
+    // Browser runner exited 0 and returned JSON, but the runner
     // self-reported "tool_error" per assertion (e.g. captcha, rate limit).
     // The OLD bug: this would map to assertion.outcome=tool_error but report
     // status would be "pass" (because the only fail check was r.outcome==="fail").
@@ -248,7 +248,7 @@ describe("G2: user-test subprocess outcome → report.status", () => {
         exitCode: 0,
         stdout: JSON.stringify({
           results: [
-            { assertion_id: "A-001-002", outcome: "tool_error", detail: "captcha blocked browser-use" },
+            { assertion_id: "A-001-002", outcome: "tool_error", detail: "browser launch failed" },
             { assertion_id: "A-001-003", outcome: "pass", detail: "ok" },
           ],
         }),
@@ -264,7 +264,7 @@ describe("G2: user-test subprocess outcome → report.status", () => {
   });
 
   test("G2: tool_error wins over fail in mixed outcomes", async () => {
-    // If browser-use reports one tool_error and one fail, treat the WHOLE
+    // If the browser runner reports one tool_error and one fail, treat the WHOLE
     // report as tool_error. Otherwise Steward would route BROKEN_IMPL on the
     // fail, when the upstream tool was actually broken.
     const r = await runUserTest({
@@ -311,41 +311,107 @@ describe("G2: user-test subprocess outcome → report.status", () => {
   });
 });
 
-describe("scripts/user_test_runner.py G2 contract", () => {
+describe("playwright-user-test.ts deterministic browser contract", () => {
   let TMP: string;
   beforeEach(async () => {
-    TMP = join(tmpdir(), `gflow-python-usertest-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    TMP = join(tmpdir(), `gflow-playwright-usertest-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
     await mkdir(TMP, { recursive: true });
   });
   afterEach(async () => {
     await rm(TMP, { recursive: true, force: true });
   });
 
-  test("browser-use importable but no provider key exits 4", async () => {
-    await writeFile(join(TMP, "browser_use.py"), "class Agent:\n    pass\n", "utf8");
-    const r = await runPythonRunner(TMP, {});
-    expect(r.exitCode).toBe(4);
-    expect(r.stderr).toContain("no LLM API key set");
-  });
-
-  test("browser-use assertion exception emits per-assertion tool_error", async () => {
+  test("static todo app passes real Chromium fill/click/text checks", async () => {
     await writeFile(
-      join(TMP, "browser_use.py"),
-      [
-        "class Agent:",
-        "    def __init__(self, task):",
-        "        self.task = task",
-        "    def run_sync(self):",
-        "        raise RuntimeError('browser launch failed')",
-        "",
-      ].join("\n"),
+      join(TMP, "index.html"),
+      `<!doctype html><html><body>
+        <input id="todo-input">
+        <button id="add-todo">Add Todo</button>
+        <ul id="todo-list"></ul>
+        <script>
+          document.getElementById('add-todo').addEventListener('click', () => {
+            const input = document.getElementById('todo-input');
+            const value = input.value.trim();
+            if (!value) return;
+            const li = document.createElement('li');
+            li.textContent = value;
+            document.getElementById('todo-list').appendChild(li);
+            input.value = '';
+          });
+        </script>
+      </body></html>`,
       "utf8",
     );
-    const r = await runPythonRunner(TMP, { OPENAI_API_KEY: "test-key" });
-    expect(r.exitCode).toBe(0);
-    const parsed = JSON.parse(r.stdout);
-    expect(parsed.results[0].outcome).toBe("tool_error");
-    expect(parsed.results[0].detail).toContain("browser launch failed");
+    const r = await runUserTest({
+      flow_id: "f_test_0001",
+      feature: {
+        ...feature,
+        assertions: [
+          {
+            id: "A-REAL-001",
+            text: "Typing Buy milk and clicking Add Todo appends Buy milk",
+            validator: "user-test",
+            evidence_required: "Chromium DOM observation",
+            user_check: {
+              kind: "browser_flow",
+              start: "file",
+              path: "index.html",
+              steps: [
+                { kind: "fill", selector: "#todo-input", value: "Buy milk" },
+                { kind: "click", selector: "#add-todo" },
+                { kind: "expect_text", selector: "#todo-list", text: "Buy milk" },
+              ],
+              timeout_ms: 5000,
+            },
+            status: "pending",
+            origin: "original",
+            attempts: [],
+          },
+        ],
+      },
+      target_dir: TMP,
+      target_url: "http://localhost:3000",
+      timeoutMs: 20_000,
+    });
+    expect(r.status).toBe("pass");
+    expect(r.assertion_results[0]!.outcome).toBe("pass");
+  });
+
+  test("broken DOM selector fails the user-test assertion, not fake pass", async () => {
+    await writeFile(join(TMP, "index.html"), "<div id='app'>empty</div>", "utf8");
+    const r = await runUserTest({
+      flow_id: "f_test_0001",
+      feature: {
+        ...feature,
+        assertions: [
+          {
+            id: "A-REAL-002",
+            text: "Clicking missing add button should append an item",
+            validator: "user-test",
+            evidence_required: "Chromium DOM observation",
+            user_check: {
+              kind: "browser_flow",
+              start: "file",
+              path: "index.html",
+              steps: [
+                { kind: "click", selector: "#missing-button" },
+                { kind: "expect_text", selector: "#todo-list", text: "Buy milk" },
+              ],
+              timeout_ms: 1000,
+            },
+            status: "pending",
+            origin: "original",
+            attempts: [],
+          },
+        ],
+      },
+      target_dir: TMP,
+      target_url: "http://localhost:3000",
+      timeoutMs: 20_000,
+    });
+    expect(r.status).toBe("fail");
+    expect(r.assertion_results[0]!.outcome).toBe("fail");
+    expect(r.assertion_results[0]!.detail).toContain("#missing-button");
   });
 });
 
@@ -381,40 +447,3 @@ describe("writeUserTestReport", () => {
     expect(back.status).toBe("pass");
   });
 });
-
-async function runPythonRunner(
-  cwd: string,
-  envOverrides: Record<string, string>,
-): Promise<{ exitCode: number | null; stdout: string; stderr: string }> {
-  const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v !== undefined && !PROVIDER_KEYS.includes(k)) env[k] = v;
-  }
-  env.PYTHONPATH = cwd;
-  Object.assign(env, envOverrides);
-
-  const proc = Bun.spawn(["python3", PY_RUNNER], {
-    cwd,
-    env,
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  proc.stdin.write(JSON.stringify({
-    target_url: "http://localhost:3000",
-    assertions: [
-      {
-        id: "A-001-002",
-        text: "Form redirects to /dashboard",
-        evidence_required: "screenshot",
-      },
-    ],
-  }));
-  proc.stdin.end();
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { exitCode, stdout, stderr };
-}

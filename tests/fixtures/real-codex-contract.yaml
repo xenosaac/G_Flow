@@ -117,6 +117,19 @@ milestones:
             status: pending
             origin: original
             attempts: []
+            user_check:
+              kind: browser_flow
+              start: file
+              path: index.html
+              steps:
+                - kind: fill
+                  selector: "#todo-input"
+                  value: Buy milk
+                - kind: click
+                  selector: "#add-todo"
+                - kind: expect_text
+                  selector: "#todo-list"
+                  text: Buy milk
           - id: A-002-003
             text: "Entering `   Walk dog   ` in #todo-input and clicking #add-todo appends
               one li under #todo-list with visible text `Walk dog` without
@@ -127,6 +140,19 @@ milestones:
             status: pending
             origin: original
             attempts: []
+            user_check:
+              kind: browser_flow
+              start: file
+              path: index.html
+              steps:
+                - kind: fill
+                  selector: "#todo-input"
+                  value: "   Walk dog   "
+                - kind: click
+                  selector: "#add-todo"
+                - kind: expect_text
+                  selector: "#todo-list"
+                  text: Walk dog
           - id: A-002-004
             text: "After a non-empty todo is added, #todo-input value becomes an empty
               string."
@@ -136,6 +162,19 @@ milestones:
             status: pending
             origin: original
             attempts: []
+            user_check:
+              kind: browser_flow
+              start: file
+              path: index.html
+              steps:
+                - kind: fill
+                  selector: "#todo-input"
+                  value: Buy milk
+                - kind: click
+                  selector: "#add-todo"
+                - kind: expect_value
+                  selector: "#todo-input"
+                  value: ""
       - id: F-003
         title: Ignore blank submissions
         spec: Ensure the click handler does not append a list item when the trimmed
@@ -151,6 +190,16 @@ milestones:
             status: pending
             origin: original
             attempts: []
+            user_check:
+              kind: browser_flow
+              start: file
+              path: index.html
+              steps:
+                - kind: click
+                  selector: "#add-todo"
+                - kind: expect_count
+                  selector: "#todo-list li"
+                  count: 0
           - id: A-003-002
             text: "Entering only spaces in #todo-input and clicking #add-todo does not
               append any li under #todo-list."
@@ -160,3 +209,16 @@ milestones:
             status: pending
             origin: original
             attempts: []
+            user_check:
+              kind: browser_flow
+              start: file
+              path: index.html
+              steps:
+                - kind: fill
+                  selector: "#todo-input"
+                  value: "   "
+                - kind: click
+                  selector: "#add-todo"
+                - kind: expect_count
+                  selector: "#todo-list li"
+                  count: 0

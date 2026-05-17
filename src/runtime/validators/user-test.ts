@@ -2,7 +2,7 @@ import { writeFile, mkdir, rename } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnPiped } from "../../adapters/spawn.ts";
-import type { FeatureT } from "../../artifacts/contract.ts";
+import type { FeatureT, UserCheckT } from "../../artifacts/contract.ts";
 import {
   ValidatorReport,
   type ValidatorReportT,
@@ -19,9 +19,10 @@ export interface RunUserTestInput {
   target_url: string;
   /** Test hook: shorten timeout. */
   timeoutMs?: number;
-  /** Test hook: override the runner. Defaults to the Python subprocess wrapper. */
+  /** Test hook: override the runner. Defaults to the Playwright subprocess runner. */
   runner?: SubprocessRunner;
-  /** Test hook: alternate Python interpreter / script path. */
+  /** Test hook: alternate runtime / script path. Defaults to Bun + Playwright runner. */
+  runtime?: string;
   python?: string;
   script?: string;
 }
@@ -35,12 +36,17 @@ export interface SubprocessOutcome {
 
 export type SubprocessRunner = (
   spec: UserTestSpec,
-  ctx: { python: string; script: string; cwd: string; timeoutMs: number },
+  ctx: { runtime: string; python: string; script: string; cwd: string; timeoutMs: number },
 ) => Promise<SubprocessOutcome>;
 
 export interface UserTestSpec {
   target_url: string;
-  assertions: { id: string; text: string; evidence_required: string }[];
+  assertions: {
+    id: string;
+    text: string;
+    evidence_required: string;
+    user_check: UserCheckT;
+  }[];
 }
 
 /**
@@ -61,13 +67,26 @@ export async function runUserTest(
 
   const spec: UserTestSpec = {
     target_url: input.target_url,
-    assertions: userAssertions.map((a) => ({
-      id: a.id,
-      text: a.text,
-      evidence_required: a.evidence_required,
-    })),
+    assertions: userAssertions
+      .filter((a) => a.user_check)
+      .map((a) => ({
+        id: a.id,
+        text: a.text,
+        evidence_required: a.evidence_required,
+        user_check: a.user_check!,
+      })),
   };
 
+  const missingUserCheck = userAssertions.filter((a) => !a.user_check);
+  if (missingUserCheck.length > 0) {
+    return toolErrorReport(
+      input,
+      "missing_user_check",
+      `user-test assertions missing user_check: ${missingUserCheck.map((a) => a.id).join(", ")}`,
+    );
+  }
+
+  const runtime = input.runtime ?? process.env.GFLOW_BUN ?? "bun";
   const python = input.python ?? process.env.GFLOW_PYTHON ?? "python3";
   const script = input.script ?? defaultScriptPath();
   const runner = input.runner ?? defaultSubprocessRunner;
@@ -75,6 +94,7 @@ export async function runUserTest(
   let outcome: SubprocessOutcome;
   try {
     outcome = await runner(spec, {
+      runtime,
       python,
       script,
       cwd: input.target_dir,
@@ -188,9 +208,12 @@ function toolErrorReport(
 
 async function defaultSubprocessRunner(
   spec: UserTestSpec,
-  ctx: { python: string; script: string; cwd: string; timeoutMs: number },
+  ctx: { runtime: string; python: string; script: string; cwd: string; timeoutMs: number },
 ): Promise<SubprocessOutcome> {
-  const r = await spawnPiped([ctx.python, ctx.script], {
+  const argv = ctx.script.endsWith(".py")
+    ? [ctx.python, ctx.script]
+    : [ctx.runtime, ctx.script];
+  const r = await spawnPiped(argv, {
     cwd: ctx.cwd,
     timeoutMs: ctx.timeoutMs,
     stdin: JSON.stringify(spec),
@@ -204,9 +227,9 @@ async function defaultSubprocessRunner(
 }
 
 function defaultScriptPath(): string {
-  // src/runtime/validators/user-test.ts -> ../../../scripts/user_test_runner.py
+  // src/runtime/validators/user-test.ts -> ./playwright-user-test.ts
   const here = fileURLToPath(import.meta.url);
-  return join(here, "..", "..", "..", "..", "scripts", "user_test_runner.py");
+  return join(here, "..", "playwright-user-test.ts");
 }
 
 function tailOf(s: string, n: number): string {
