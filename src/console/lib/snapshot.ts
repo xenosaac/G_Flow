@@ -14,6 +14,7 @@ import {
   type ValidatorReportT,
 } from "../../artifacts/reports.ts";
 import type { FlowStateT } from "../../artifacts/state.ts";
+import type { ClarificationQuestion } from "../../runtime/planning-review.ts";
 
 export interface FlowSnapshot {
   flow_id: string;
@@ -32,6 +33,7 @@ export interface FlowSnapshot {
       latest_failures: string[];
     };
   };
+  clarification_questions: ClarificationQuestion[];
   needs_human_reason: string | null;
 }
 
@@ -83,6 +85,7 @@ export async function readSnapshot(flow_id: string): Promise<FlowSnapshot | null
       : null,
     triage: featureId ? await readLatestTriage(reportsDir, featureId) : null,
   };
+  const clarification_questions = await readLatestClarificationQuestions(dir);
 
   const attempt_history: FlowSnapshot["attempt_history"] = {};
   if (contract) {
@@ -122,8 +125,35 @@ export async function readSnapshot(flow_id: string): Promise<FlowSnapshot | null
     contract,
     latest,
     attempt_history,
+    clarification_questions,
     needs_human_reason,
   };
+}
+
+async function readLatestClarificationQuestions(
+  dir: string,
+): Promise<ClarificationQuestion[]> {
+  try {
+    const cdir = join(dir, "clarifications");
+    const files = (await readdir(cdir))
+      .filter((f) => f.startsWith("intake-") && f.endsWith(".json"))
+      .sort()
+      .reverse();
+    if (files.length === 0) return [];
+    const raw = JSON.parse(await readFile(join(cdir, files[0]!), "utf8"));
+    if (raw.status !== "needs_clarification" || !Array.isArray(raw.questions)) {
+      return [];
+    }
+    return raw.questions
+      .map((q: Record<string, unknown>) => ({
+        id: String(q.id ?? ""),
+        text: String(q.text ?? ""),
+        why: String(q.why ?? ""),
+      }))
+      .filter((q: ClarificationQuestion) => q.id && q.text);
+  } catch {
+    return [];
+  }
 }
 
 async function readLatestHandoff(
@@ -242,7 +272,7 @@ export async function snapshotMtime(flow_id: string): Promise<number> {
   const root = gflowRoot();
   const dir = flowDir(flow_id, root);
   let max = 0;
-  for (const sub of ["state.json", "contract.yaml", "handoffs", "reports", "decisions"]) {
+  for (const sub of ["state.json", "contract.yaml", "control.json", "run.lock", "clarifications", "handoffs", "reports", "decisions"]) {
     try {
       const s = await stat(join(dir, sub));
       if (s.isDirectory()) {

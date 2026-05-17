@@ -12,7 +12,7 @@
 # Requirements:
 #   - bun on PATH
 #   - claude CLI on PATH (or set GFLOW_BACKEND=mock for a dry run)
-#   - python3 + browser-use (optional; UserTest will report tool_error otherwise)
+#   - Playwright Chromium installed (`bunx playwright install chromium`)
 #
 # In a second terminal: bun run console:dev   →   http://localhost:3030
 

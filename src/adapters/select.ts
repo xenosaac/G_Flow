@@ -3,13 +3,13 @@ import type { AgentBackend } from "./backend.ts";
 export class UnknownBackendError extends Error {
   constructor(public readonly value: string) {
     super(
-      `Unknown GFLOW_BACKEND="${value}". Expected one of: claude-code, codex, opencloud, none.`,
+      `Unknown GFLOW_BACKEND="${value}". Expected one of: claude-code, codex, none.`,
     );
     this.name = "UnknownBackendError";
   }
 }
 
-export const KNOWN_BACKENDS = ["claude-code", "codex", "opencloud", "none"] as const;
+export const KNOWN_BACKENDS = ["claude-code", "codex", "none"] as const;
 export type KnownBackend = (typeof KNOWN_BACKENDS)[number];
 
 /**
@@ -26,10 +26,6 @@ export async function selectBackend(name?: string): Promise<AgentBackend | null>
   if (choice === "codex") {
     const { CodexBackend } = await import("./codex.ts");
     return new CodexBackend();
-  }
-  if (choice === "opencloud") {
-    const { OpenCloudBackend } = await import("./opencloud.ts");
-    return new OpenCloudBackend();
   }
   throw new UnknownBackendError(choice);
 }

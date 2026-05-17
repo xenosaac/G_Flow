@@ -10,6 +10,7 @@ export type Cmd =
   | { kind: "chat"; text: string }
   | { kind: "start"; goal: string }
   | { kind: "resume" }
+  | { kind: "pause" }
   | { kind: "status" }
   | { kind: "help" }
   | { kind: "new" }
@@ -27,6 +28,8 @@ export function parseCommand(raw: string): Cmd | null {
     case "resume":
     case "approve":
       return { kind: "resume" };
+    case "pause":
+      return { kind: "pause" };
     case "status":
       return { kind: "status" };
     case "new":
@@ -51,10 +54,11 @@ After acceptance Phase 2 runs autonomously; further messages become Q&A.
 
 Slash commands:
   /start <goal>   Mint a flow even when one already exists
+  /pause          Request pause at the next checkpoint
   /resume         Force "Accept Plan" (same as the button)
   /approve        Alias for /resume
   /status         Print the current flow snapshot
-  /new, /clear    Start a fresh chat (does not touch the flow on disk)
+  /new, /clear    Start a fresh chat view for a new goal
   /help           Show this message
 
 Cmd/Ctrl+Enter sends · Enter inserts a newline`;

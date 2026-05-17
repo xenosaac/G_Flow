@@ -71,7 +71,7 @@ export interface NextActionInput {
  * for the current feature, return the next Action. No I/O.
  *
  * Order of precedence:
- *  1. terminal phases (complete / needs_human / planning)
+ *  1. terminal phases (complete / needs_human / clarifying / planning / paused)
  *  2. cold-start (no current feature) → run Worker on first feature
  *  3. step-based dispatch using state.current_step
  *  4. G2 (usertest tool_error → INFRA triage)
@@ -82,11 +82,25 @@ export function nextAction(input: NextActionInput): Action {
   const { state, contract } = input;
 
   if (state.phase === "complete") return { type: "complete" };
+  if (state.phase === "paused") {
+    return {
+      type: "halt",
+      reason: "awaiting_approval",
+      detail: "state.phase=paused; run `gflow resume`",
+    };
+  }
   if (state.phase === "needs_human") {
     return {
       type: "halt",
       reason: "needs_human",
       detail: "state.phase=needs_human",
+    };
+  }
+  if (state.phase === "clarifying") {
+    return {
+      type: "halt",
+      reason: "awaiting_approval",
+      detail: "flow is waiting for clarification answers",
     };
   }
   if (state.phase === "planning") {

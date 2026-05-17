@@ -1,4 +1,8 @@
-import { startFlowAPI, PlannerError } from "../../../../../runtime/flow-control.ts";
+import {
+  PlanningReviewError,
+  PlannerError,
+  startFlowAPI,
+} from "../../../../../runtime/flow-control.ts";
 import { selectBackend, UnknownBackendError } from "../../../../../adapters/select.ts";
 
 export const dynamic = "force-dynamic";
@@ -35,7 +39,7 @@ export async function POST(req: Request) {
     const result = await startFlowAPI({ goal, backend });
     return Response.json({ ok: true, ...result });
   } catch (err) {
-    if (err instanceof PlannerError) {
+    if (err instanceof PlannerError || err instanceof PlanningReviewError) {
       return Response.json(
         {
           ok: false,

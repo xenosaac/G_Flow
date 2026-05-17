@@ -74,11 +74,15 @@ export function newFlowId(now: Date = new Date(), randomSeq?: number): string {
   return `f_${y}_${m}_${d}_${seq}`;
 }
 
-export function initialState(flowId: string, now: Date = new Date()): FlowStateT {
+export function initialState(
+  flowId: string,
+  now: Date = new Date(),
+  phase: FlowStateT["phase"] = "planning",
+): FlowStateT {
   const iso = now.toISOString();
   return {
     flow_id: flowId,
-    phase: "planning",
+    phase,
     current_milestone: null,
     current_feature: null,
     current_step: null,

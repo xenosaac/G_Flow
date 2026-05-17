@@ -26,6 +26,9 @@ import type { runWorker } from "../src/runtime/worker.ts";
 import type { runScrewdriver } from "../src/runtime/validators/screwdriver.ts";
 import type { runUserTest } from "../src/runtime/validators/user-test.ts";
 import type { runStewardEncode, runStewardTriage } from "../src/runtime/steward.ts";
+import { writeControl, lockPath, RunLockError } from "../src/runtime/control.ts";
+import { featureWorktreePath } from "../src/runtime/worktree.ts";
+import { spawnPiped } from "../src/adapters/spawn.ts";
 
 let TMP: string;
 const FLOW = "f_test_int_0001";
@@ -63,12 +66,22 @@ function buildContract(): ContractT {
                 text: "POST /signup returns 201",
                 validator: "screwdriver",
                 evidence_required: "HTTP capture",
+                check: {
+                  kind: "command",
+                  cmd: ["true"],
+                  expected_exit_code: 0,
+                },
               },
               {
                 id: "A-001-002",
                 text: "/signup form redirects to /dashboard",
                 validator: "user-test",
                 evidence_required: "screenshot",
+                user_check: {
+                  kind: "browser_flow",
+                  start: "target_url",
+                  steps: [{ kind: "expect_url", contains: "localhost" }],
+                },
               },
             ],
           },
@@ -179,7 +192,7 @@ function toolErrorReport(feature_id: string): ValidatorReportT {
     status: "tool_error",
     assertion_results: [],
     raw_stdout_tail: "",
-    raw_stderr_tail: "browser-use crashed",
+    raw_stderr_tail: "browser runner crashed",
     recorded_at: "2026-05-16T11:40:00.000Z",
     steward_hint: "INFRA",
   });
@@ -388,6 +401,11 @@ describe("runFlow — MISSING_ASSERTION", () => {
               text: "Clicking Logout clears session cookie within 2 seconds",
               validator: "user-test",
               evidence_required: "cookie inspection after click",
+              user_check: {
+                kind: "browser_flow",
+                start: "target_url",
+                steps: [{ kind: "click", selector: "#logout" }],
+              },
               status: "pending",
               origin: "corrective",
               attempts: [],
@@ -537,6 +555,205 @@ describe("runFlow — phase gates", () => {
   });
 });
 
+describe("runFlow — pause, lock recovery, and worktrees", () => {
+  test("pause request stops before launching the next action", async () => {
+    const contract = buildContract();
+    await seedFlow(contract);
+    await writeControl(FLOW, { pause_requested: true, reason: "test pause" }, TMP);
+
+    let workerCalls = 0;
+    const r = await runFlow({
+      flow_id: FLOW,
+      target_dir: TMP,
+      target_url: "http://localhost:3000",
+      backend: new MockBackend(() => ({ stdout: "" })),
+      root: TMP,
+      workerRun: async (input) => {
+        workerCalls++;
+        return okWorker(input);
+      },
+      maxIterations: 10,
+    });
+
+    expect(r.status).toBe("paused");
+    expect(workerCalls).toBe(0);
+    const state = JSON.parse(await readFile(join(TMP, FLOW, "state.json"), "utf8"));
+    expect(state.phase).toBe("paused");
+  });
+
+  test("resume clears paused phase and continues the same flow", async () => {
+    const contract = buildContract();
+    await seedFlow(contract);
+    await writeState({ ...initialState(), phase: "paused" }, TMP);
+    await writeControl(FLOW, { pause_requested: false }, TMP);
+
+    const r = await runFlow({
+      flow_id: FLOW,
+      target_dir: TMP,
+      target_url: "http://localhost:3000",
+      backend: new MockBackend(() => ({ stdout: "" })),
+      root: TMP,
+      approve: true,
+      workerRun: okWorker,
+      screwdriverRun: async (input) =>
+        passReport(input.feature.id, ["A-001-001"], "screwdriver"),
+      userTestRun: async (input) =>
+        passReport(input.feature.id, ["A-001-002"], "user-test"),
+      stewardEncodeRun: okEncode,
+      maxIterations: 50,
+    });
+    expect(r.status).toBe("complete");
+  });
+
+  test("live run.lock blocks a second runner", async () => {
+    const contract = buildContract();
+    await seedFlow(contract);
+    const now = new Date().toISOString();
+    await writeFile(
+      lockPath(FLOW, TMP),
+      JSON.stringify({ pid: process.pid, started_at: now, heartbeat_at: now }, null, 2),
+      "utf8",
+    );
+    await expect(
+      runFlow({
+        flow_id: FLOW,
+        target_dir: TMP,
+        target_url: "http://localhost:3000",
+        backend: new MockBackend(() => ({ stdout: "" })),
+        root: TMP,
+      }),
+    ).rejects.toThrow(RunLockError);
+  });
+
+  test("stale run.lock is archived and flow resumes", async () => {
+    const contract = buildContract();
+    await seedFlow(contract);
+    await writeState({ ...initialState(), phase: "complete" }, TMP);
+    await writeFile(
+      lockPath(FLOW, TMP),
+      JSON.stringify({
+        pid: 999999,
+        started_at: "2020-01-01T00:00:00.000Z",
+        heartbeat_at: "2020-01-01T00:00:00.000Z",
+      }, null, 2),
+      "utf8",
+    );
+    const r = await runFlow({
+      flow_id: FLOW,
+      target_dir: TMP,
+      target_url: "http://localhost:3000",
+      backend: new MockBackend(() => ({ stdout: "" })),
+      root: TMP,
+      lockStaleMs: 1,
+    });
+    expect(r.status).toBe("complete");
+    const files = await readdir(join(TMP, FLOW));
+    expect(files.some((f) => f.startsWith("run.lock.stale-"))).toBe(true);
+  });
+
+  test("passing worktree merges back into target_dir", async () => {
+    const contract = buildContract();
+    await seedFlow(contract);
+    const target = join(TMP, "git-target-pass");
+    await initGitTarget(target);
+
+    const r = await runFlow({
+      flow_id: FLOW,
+      target_dir: target,
+      target_url: "http://localhost:3000",
+      backend: new MockBackend(() => ({ stdout: "" })),
+      root: TMP,
+      workerRun: async (input) => {
+        await writeFile(join(input.target_dir, "app.txt"), "feature shipped\n", "utf8");
+        return okWorker(input);
+      },
+      screwdriverRun: async (input) =>
+        passReport(input.feature.id, ["A-001-001"], "screwdriver"),
+      userTestRun: async (input) =>
+        passReport(input.feature.id, ["A-001-002"], "user-test"),
+      stewardEncodeRun: okEncode,
+      maxIterations: 50,
+    });
+    expect(r.status).toBe("complete");
+    expect(await readFile(join(target, "app.txt"), "utf8")).toContain("feature shipped");
+  });
+
+  test("failing worktree remains inspectable and target_dir is unchanged", async () => {
+    const contract = buildContract();
+    await seedFlow(contract);
+    const target = join(TMP, "git-target-fail");
+    await initGitTarget(target);
+
+    const r = await runFlow({
+      flow_id: FLOW,
+      target_dir: target,
+      target_url: "http://localhost:3000",
+      backend: new MockBackend(() => ({ stdout: "" })),
+      root: TMP,
+      workerRun: async (input) => {
+        await writeFile(join(input.target_dir, "app.txt"), "broken attempt\n", "utf8");
+        return okWorker(input);
+      },
+      screwdriverRun: async (input) =>
+        passReport(input.feature.id, ["A-001-001"], "screwdriver"),
+      userTestRun: async (input) =>
+        failReport(input.feature.id, ["A-001-002"], "user-test"),
+      stewardEncodeRun: okEncode,
+      stewardTriageRun: async () => ({
+        classification: "INFRA",
+        rationale: "stop after failing worktree",
+        new_assertions: [],
+        raw: "{}",
+      }),
+      maxIterations: 50,
+    });
+    expect(r.status).toBe("needs_human");
+    expect(await readFile(join(target, "app.txt"), "utf8")).toContain("base");
+    const wt = featureWorktreePath(join(TMP, FLOW), "F-001", 1);
+    expect(await readFile(join(wt, "app.txt"), "utf8")).toContain("broken attempt");
+  });
+
+  test("replay after interruption does not duplicate completed worker artifacts", async () => {
+    const contract = buildContract();
+    await seedFlow(contract);
+    let workerCalls = 0;
+    const worker: typeof runWorker = async (input) => {
+      workerCalls++;
+      return okWorker(input);
+    };
+    await expect(
+      runFlow({
+        flow_id: FLOW,
+        target_dir: TMP,
+        target_url: "http://localhost:3000",
+        backend: new MockBackend(() => ({ stdout: "" })),
+        root: TMP,
+        workerRun: worker,
+        maxIterations: 1,
+      }),
+    ).rejects.toThrow(/exceeded max iterations/);
+
+    const r = await runFlow({
+      flow_id: FLOW,
+      target_dir: TMP,
+      target_url: "http://localhost:3000",
+      backend: new MockBackend(() => ({ stdout: "" })),
+      root: TMP,
+      workerRun: worker,
+      screwdriverRun: async (input) =>
+        passReport(input.feature.id, ["A-001-001"], "screwdriver"),
+      userTestRun: async (input) =>
+        passReport(input.feature.id, ["A-001-002"], "user-test"),
+      stewardEncodeRun: okEncode,
+      maxIterations: 50,
+    });
+    expect(r.status).toBe("complete");
+    expect(workerCalls).toBe(1);
+    const handoffs = await readdir(join(TMP, FLOW, "handoffs"));
+    expect(handoffs.filter((f) => f === "F-001__attempt-01.json")).toHaveLength(1);
+  });
+});
+
 describe("appendAssertions helper", () => {
   test("appends assertions tagged origin=corrective", () => {
     const c = buildContract();
@@ -546,6 +763,7 @@ describe("appendAssertions helper", () => {
         text: "Some new check",
         validator: "screwdriver",
         evidence_required: "log",
+        check: { kind: "command", cmd: ["true"], expected_exit_code: 0 },
         status: "pending",
         origin: "original",
         attempts: [],
@@ -556,3 +774,18 @@ describe("appendAssertions helper", () => {
     expect(newA.origin).toBe("corrective");
   });
 });
+
+async function initGitTarget(target: string): Promise<void> {
+  await mkdir(target, { recursive: true });
+  await writeFile(join(target, "app.txt"), "base\n", "utf8");
+  await git(target, ["init", "-q"]);
+  await git(target, ["config", "user.email", "gflow@test.local"]);
+  await git(target, ["config", "user.name", "G Flow Test"]);
+  await git(target, ["add", "-A"]);
+  await git(target, ["commit", "-m", "base"]);
+}
+
+async function git(cwd: string, args: string[]): Promise<void> {
+  const r = await spawnPiped(["git", ...args], { cwd, timeoutMs: 60_000 });
+  if (!r.ok) throw new Error(`git ${args.join(" ")} failed: ${r.stderr || r.stdout}`);
+}

@@ -25,12 +25,28 @@ const goodTree = {
               text: "POST /api/auth/signup with valid email and password returns 201 with token field",
               validator: "screwdriver",
               evidence_required: "HTTP response body capture",
+              check: {
+                kind: "command",
+                cmd: ["curl", "-fsS", "http://localhost:3000/api/auth/signup"],
+                expected_exit_code: 0,
+              },
             },
             {
               id: "A-001-002",
               text: "Filling signup form and clicking Submit redirects to /dashboard",
               validator: "user-test",
               evidence_required: "Screenshot of /dashboard after submit",
+              user_check: {
+                kind: "browser_flow",
+                start: "target_url",
+                steps: [
+                  { kind: "goto", path: "/signup" },
+                  { kind: "fill", selector: "#email", value: "test@example.com" },
+                  { kind: "fill", selector: "#password", value: "password123" },
+                  { kind: "click", selector: "#submit" },
+                  { kind: "expect_url", contains: "/dashboard" },
+                ],
+              },
             },
           ],
         },
@@ -115,6 +131,75 @@ describe("validateContractShape", () => {
       ],
     });
     expect(issues.some((i) => /validator must be/i.test(i))).toBe(true);
+  });
+
+  test("flags missing/wrong validator-specific check fields", () => {
+    const issues = validateContractShape({
+      milestones: [
+        {
+          id: "M-001",
+          features: [
+            {
+              id: "F-001",
+              assertions: [
+                {
+                  id: "A-001-001",
+                  text: "index.html exists in the target directory",
+                  validator: "screwdriver",
+                  evidence_required: "file existence",
+                  user_check: {
+                    kind: "browser_flow",
+                    start: "target_url",
+                    steps: [{ kind: "expect_url", contains: "localhost" }],
+                  },
+                },
+                {
+                  id: "A-001-002",
+                  text: "Clicking Add Todo appends one todo item",
+                  validator: "user-test",
+                  evidence_required: "browser observation",
+                  check: { kind: "file_exists", path: "index.html" },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    expect(issues.some((i) => /screwdriver validator requires check/i.test(i))).toBe(true);
+    expect(issues.some((i) => /screwdriver validator must not include user_check/i.test(i))).toBe(true);
+    expect(issues.some((i) => /user-test validator requires user_check/i.test(i))).toBe(true);
+    expect(issues.some((i) => /user-test validator must not include check/i.test(i))).toBe(true);
+  });
+
+  test("flags unsafe user_check file and goto paths", () => {
+    const issues = validateContractShape({
+      milestones: [
+        {
+          id: "M-001",
+          features: [
+            {
+              id: "F-001",
+              assertions: [
+                {
+                  id: "A-001-001",
+                  text: "Opening the static page shows the title text",
+                  validator: "user-test",
+                  evidence_required: "browser observation",
+                  user_check: {
+                    kind: "browser_flow",
+                    start: "file",
+                    path: "../index.html",
+                    steps: [{ kind: "goto", path: "https://example.com" }],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    expect(issues.some((i) => /user_check is invalid/i.test(i))).toBe(true);
   });
 
   test("flags vague assertion text", () => {

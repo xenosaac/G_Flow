@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, rename, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentBackend } from "../adapters/backend.ts";
 import {
@@ -33,7 +33,29 @@ import {
   type ContractT,
 } from "../artifacts/contract.ts";
 import type { FlowStateT } from "../artifacts/state.ts";
-import { enqueueSnapshot } from "../gbrain/client.ts";
+import { flushGbrain } from "../gbrain/client.ts";
+import {
+  emitFeatureClose,
+  emitFlowComplete,
+  emitMilestoneClose,
+  emitStewardDecision,
+  emitStewardTriage,
+  emitValidatorReport,
+  emitWorkerHandoff,
+} from "../gbrain/emit.ts";
+import { selectAdapter } from "../gbrain/adapter.ts";
+import {
+  acquireRunLock,
+  clearPause,
+  heartbeatRunLock,
+  readControl,
+  releaseRunLock,
+} from "./control.ts";
+import {
+  mergePassingWorktree,
+  prepareFeatureWorktree,
+  worktreeForAttempt,
+} from "./worktree.ts";
 
 export interface RunFlowOptions {
   flow_id: string;
@@ -52,10 +74,14 @@ export interface RunFlowOptions {
   root?: string;
   /** Flip phase=planning → executing on entry (user has approved). */
   approve?: boolean;
+  /** Test hook: disable run.lock ownership. */
+  useRunLock?: boolean;
+  /** Test hook: lock freshness threshold. */
+  lockStaleMs?: number;
 }
 
 export interface RunFlowResult {
-  status: "complete" | "needs_human" | "awaiting_approval";
+  status: "complete" | "needs_human" | "awaiting_approval" | "paused";
   reason?: string;
   iterations: number;
 }
@@ -74,87 +100,147 @@ export async function runFlow(opts: RunFlowOptions): Promise<RunFlowResult> {
   const reportsDir = join(dir, "reports");
   const decisionsDir = join(dir, "decisions");
 
-  let state = await readState(opts.flow_id, root);
+  let lockAcquired = false;
+  if (opts.useRunLock !== false) {
+    await acquireRunLock(opts.flow_id, root, opts.lockStaleMs);
+    lockAcquired = true;
+  }
 
-  // Phase 1 → Phase 2 gate. In V1 this is the "user reviewed contract" moment.
-  if (state.phase === "planning") {
-    if (!opts.approve) {
+  try {
+    let state = await readState(opts.flow_id, root);
+
+    if (state.phase === "clarifying") {
       return {
         status: "awaiting_approval",
-        reason: "contract awaits review; pass approve:true",
+        reason: "flow is waiting for clarification answers",
         iterations: 0,
       };
     }
-    state = {
-      ...state,
-      phase: "executing",
-      updated_at: new Date().toISOString(),
-    };
-    await writeState(state, root);
-  }
 
-  const maxIter = opts.maxIterations ?? 200;
-  for (let iter = 0; iter < maxIter; iter++) {
-    state = await readState(opts.flow_id, root);
-    if (state.phase === "complete")
-      return { status: "complete", iterations: iter };
-    if (state.phase === "needs_human")
-      return { status: "needs_human", iterations: iter };
-
-    const contract = await readContractYaml(contractPath);
-    const lastScrewdriver = state.current_feature
-      ? await readLatestValidatorReport(
-          reportsDir,
-          state.current_feature,
-          "screwdriver",
-        )
-      : null;
-    const lastUserTest = state.current_feature
-      ? await readLatestValidatorReport(
-          reportsDir,
-          state.current_feature,
-          "usertest",
-        )
-      : null;
-    const lastTriage = state.current_feature
-      ? await readLatestTriage(reportsDir, state.current_feature)
-      : null;
-
-    const action = nextAction({
-      state,
-      contract,
-      lastScrewdriver,
-      lastUserTest,
-      lastTriage,
-    });
-
-    await dispatch(action, opts, state, contract, {
-      dir,
-      handoffsDir,
-      reportsDir,
-      decisionsDir,
-      contractPath,
-      root,
-    });
-
-    if (action.type === "complete")
-      return { status: "complete", iterations: iter + 1 };
-    if (action.type === "halt") {
-      if (action.reason === "needs_human") {
+    if (state.phase === "paused") {
+      if (!opts.approve) {
         return {
-          status: "needs_human",
+          status: "paused",
+          reason: "flow is paused; pass approve:true to resume",
+          iterations: 0,
+        };
+      }
+      await clearPause(opts.flow_id, root);
+      state = {
+        ...state,
+        phase: "executing",
+        updated_at: new Date().toISOString(),
+      };
+      await writeState(state, root);
+    }
+
+    // Phase 1 -> Phase 2 gate. This is the "user reviewed contract" moment.
+    if (state.phase === "planning") {
+      if (!opts.approve) {
+        return {
+          status: "awaiting_approval",
+          reason: "contract awaits review; pass approve:true",
+          iterations: 0,
+        };
+      }
+      state = {
+        ...state,
+        phase: "executing",
+        updated_at: new Date().toISOString(),
+      };
+      await writeState(state, root);
+    }
+
+    const maxIter = opts.maxIterations ?? 200;
+    for (let iter = 0; iter < maxIter; iter++) {
+      state = await readState(opts.flow_id, root);
+      if (state.phase === "complete")
+        return { status: "complete", iterations: iter };
+      if (state.phase === "paused")
+        return { status: "paused", iterations: iter };
+      if (state.phase === "needs_human")
+        return { status: "needs_human", iterations: iter };
+
+      const control = await readControl(opts.flow_id, root);
+      if (control.pause_requested) {
+        await writeState(
+          {
+            ...state,
+            phase: "paused",
+            updated_at: new Date().toISOString(),
+          },
+          root,
+        );
+        return {
+          status: "paused",
+          reason: control.reason ?? "pause requested",
+          iterations: iter,
+        };
+      }
+
+      if (lockAcquired) await heartbeatRunLock(opts.flow_id, "deciding", root);
+      const contract = await readContractYaml(contractPath);
+      const lastScrewdriver = state.current_feature
+        ? await readLatestValidatorReport(
+            reportsDir,
+            state.current_feature,
+            "screwdriver",
+          )
+        : null;
+      const lastUserTest = state.current_feature
+        ? await readLatestValidatorReport(
+            reportsDir,
+            state.current_feature,
+            "usertest",
+          )
+        : null;
+      const lastTriage = state.current_feature
+        ? await readLatestTriage(reportsDir, state.current_feature)
+        : null;
+
+      const action = nextAction({
+        state,
+        contract,
+        lastScrewdriver,
+        lastUserTest,
+        lastTriage,
+      });
+
+      if (lockAcquired) await heartbeatRunLock(opts.flow_id, action.type, root);
+      await dispatch(action, opts, state, contract, {
+        dir,
+        handoffsDir,
+        reportsDir,
+        decisionsDir,
+        contractPath,
+        root,
+      });
+
+      if (action.type === "complete")
+        return { status: "complete", iterations: iter + 1 };
+      if (action.type === "halt") {
+        if (action.reason === "needs_human") {
+          return {
+            status: "needs_human",
+            reason: action.detail,
+            iterations: iter + 1,
+          };
+        }
+        return {
+          status: action.reason,
           reason: action.detail,
           iterations: iter + 1,
         };
       }
-      return {
-        status: action.reason,
-        reason: action.detail,
-        iterations: iter + 1,
-      };
     }
+    throw new Error(`runFlow: exceeded max iterations (${maxIter})`);
+  } finally {
+    // MUST flush before the caller exits — promise chains aren't durability.
+    // Every return path (complete/halt/needs_human/paused/awaiting_approval/exception)
+    // passes through here, so the JSONL outbox is always durable on disk.
+    await flushGbrain(opts.flow_id);
+    if (lockAcquired) await releaseRunLock(opts.flow_id, root);
   }
-  throw new Error(`runFlow: exceeded max iterations (${maxIter})`);
 }
 
 interface DispatchCtx {
@@ -178,27 +264,30 @@ async function dispatch(
       const now = new Date().toISOString();
       // Async, fire-and-forget. The runtime never waits for GBrain.
       if (state.current_feature && state.current_milestone) {
-        enqueueSnapshot({
+        const featureTitle = findFeatureTitle(contract, state.current_feature);
+        emitFeatureClose({
           flow_id: opts.flow_id,
-          kind: "feature_close",
-          recorded_at: now,
-          payload: {
-            feature_id: state.current_feature,
-            milestone_id: state.current_milestone,
-          },
+          contract,
+          feature_id: state.current_feature,
+          milestone_id: state.current_milestone,
+          feature_title: featureTitle,
+          target_dir: opts.target_dir,
+          target_url: opts.target_url,
         });
-        enqueueSnapshot({
+        emitMilestoneClose({
           flow_id: opts.flow_id,
-          kind: "milestone_close",
-          recorded_at: now,
-          payload: { milestone_id: state.current_milestone },
+          contract,
+          milestone_id: state.current_milestone,
+          target_dir: opts.target_dir,
+          target_url: opts.target_url,
         });
       }
-      enqueueSnapshot({
+      emitFlowComplete({
         flow_id: opts.flow_id,
-        kind: "flow_complete",
-        recorded_at: now,
-        payload: {},
+        contract,
+        goal: contract.goal,
+        target_dir: opts.target_dir,
+        target_url: opts.target_url,
       });
       await writeState(
         {
@@ -209,6 +298,10 @@ async function dispatch(
         },
         ctx.root,
       );
+      // Auto-drain on flow_complete (best-effort, never blocks).
+      void selectAdapter().drainOutbox(opts.flow_id).catch(() => {
+        // swallow — Console + CLI surface drain failures explicitly
+      });
       return;
     }
     case "halt": {
@@ -222,21 +315,22 @@ async function dispatch(
     }
     case "advance": {
       const now = new Date().toISOString();
-      enqueueSnapshot({
+      emitFeatureClose({
         flow_id: opts.flow_id,
-        kind: "feature_close",
-        recorded_at: now,
-        payload: {
-          feature_id: action.from.feature_id,
-          milestone_id: action.from.milestone_id,
-        },
+        contract,
+        feature_id: action.from.feature_id,
+        milestone_id: action.from.milestone_id,
+        feature_title: findFeatureTitle(contract, action.from.feature_id),
+        target_dir: opts.target_dir,
+        target_url: opts.target_url,
       });
       if (action.to.milestone_id !== action.from.milestone_id) {
-        enqueueSnapshot({
+        emitMilestoneClose({
           flow_id: opts.flow_id,
-          kind: "milestone_close",
-          recorded_at: now,
-          payload: { milestone_id: action.from.milestone_id },
+          contract,
+          milestone_id: action.from.milestone_id,
+          target_dir: opts.target_dir,
+          target_url: opts.target_url,
         });
       }
       await writeState(
@@ -264,14 +358,23 @@ async function dispatch(
         await writeState(s, ctx.root);
       }
       const { handoff } = await (opts.workerRun ?? runWorker)({
+        ...(await workerTarget(opts, ctx, action.feature.id, action.attempt)),
         flow_id: opts.flow_id,
         feature: action.feature,
         milestone_id: action.milestone_id,
-        target_dir: opts.target_dir,
         backend: opts.backend,
         attempt: action.attempt,
       });
       await writeHandoff(handoff, ctx.handoffsDir, action.attempt);
+      emitWorkerHandoff({
+        flow_id: opts.flow_id,
+        contract,
+        feature_id: action.feature.id,
+        milestone_id: action.milestone_id,
+        feature_title: action.feature.title,
+        handoff,
+        target_dir: opts.target_dir,
+      });
       await writeState(
         {
           ...s,
@@ -284,15 +387,24 @@ async function dispatch(
     }
     case "corrective_worker": {
       const { handoff } = await (opts.workerRun ?? runWorker)({
+        ...(await workerTarget(opts, ctx, action.feature.id, action.attempt)),
         flow_id: opts.flow_id,
         feature: action.feature,
         milestone_id: action.milestone_id,
-        target_dir: opts.target_dir,
         backend: opts.backend,
         attempt: action.attempt,
         failures: action.failures,
       });
       await writeHandoff(handoff, ctx.handoffsDir, action.attempt);
+      emitWorkerHandoff({
+        flow_id: opts.flow_id,
+        contract,
+        feature_id: action.feature.id,
+        milestone_id: action.milestone_id,
+        feature_title: action.feature.title,
+        handoff,
+        target_dir: opts.target_dir,
+      });
       const newCorrective =
         (state.corrective_attempts[action.feature.id] ?? 0) + 1;
       await writeState(
@@ -310,13 +422,24 @@ async function dispatch(
       return;
     }
     case "screwdriver": {
-      const report = await (opts.screwdriverRun ?? runScrewdriver)({
-        flow_id: opts.flow_id,
-        feature: action.feature,
-        target_dir: opts.target_dir,
-      });
       const attempt = featureAttempt(state, action.feature.id);
+      const target = await validatorTarget(opts, ctx, action.feature.id, attempt);
+      const report = await runWithHiddenWorktreeGitFile(target, () =>
+        (opts.screwdriverRun ?? runScrewdriver)({
+          flow_id: opts.flow_id,
+          feature: action.feature,
+          target_dir: target,
+        }),
+      );
       await writeScrewdriverReport(report, ctx.reportsDir, attempt);
+      emitValidatorReport({
+        flow_id: opts.flow_id,
+        contract,
+        feature_id: action.feature.id,
+        milestone_id: findMilestoneFor(contract, action.feature.id),
+        feature_title: action.feature.title,
+        report,
+      });
       await writeState(
         {
           ...state,
@@ -328,14 +451,25 @@ async function dispatch(
       return;
     }
     case "usertest": {
-      const report = await (opts.userTestRun ?? runUserTest)({
-        flow_id: opts.flow_id,
-        feature: action.feature,
-        target_dir: opts.target_dir,
-        target_url: opts.target_url,
-      });
       const attempt = featureAttempt(state, action.feature.id);
+      const target = await validatorTarget(opts, ctx, action.feature.id, attempt);
+      const report = await runWithHiddenWorktreeGitFile(target, () =>
+        (opts.userTestRun ?? runUserTest)({
+          flow_id: opts.flow_id,
+          feature: action.feature,
+          target_dir: target,
+          target_url: opts.target_url,
+        }),
+      );
       await writeUserTestReport(report, ctx.reportsDir, attempt);
+      emitValidatorReport({
+        flow_id: opts.flow_id,
+        contract,
+        feature_id: action.feature.id,
+        milestone_id: findMilestoneFor(contract, action.feature.id),
+        feature_title: action.feature.title,
+        report,
+      });
       await writeState(
         {
           ...state,
@@ -378,6 +512,24 @@ async function dispatch(
         action.attempt,
         ctx.decisionsDir,
       );
+      emitStewardDecision({
+        flow_id: opts.flow_id,
+        contract,
+        feature_id: action.feature.id,
+        milestone_id: findMilestoneFor(contract, action.feature.id),
+        outcome: action.outcome,
+        attempt: action.attempt,
+        body_md: r.body,
+      });
+      if (action.outcome === "passing") {
+        await mergePassingWorktree({
+          flowDir: ctx.dir,
+          targetDir: opts.target_dir,
+          flowId: opts.flow_id,
+          featureId: action.feature.id,
+          attempt: action.attempt,
+        });
+      }
       await writeState(
         {
           ...state,
@@ -418,6 +570,15 @@ async function dispatch(
       });
       const attempt = featureAttempt(state, action.feature.id);
       await writeTriage(triage, action.feature.id, attempt, ctx.reportsDir);
+      emitStewardTriage({
+        flow_id: opts.flow_id,
+        contract,
+        feature_id: action.feature.id,
+        milestone_id: findMilestoneFor(contract, action.feature.id),
+        classification: triage.classification,
+        rationale: triage.rationale,
+        new_assertions_count: triage.new_assertions.length,
+      });
       if (
         triage.classification === "MISSING_ASSERTION" &&
         triage.new_assertions.length > 0
@@ -438,6 +599,83 @@ async function dispatch(
         ctx.root,
       );
       return;
+    }
+  }
+}
+
+async function workerTarget(
+  opts: RunFlowOptions,
+  ctx: DispatchCtx,
+  featureId: string,
+  attempt: number,
+): Promise<{ target_dir: string }> {
+  const ref = await prepareFeatureWorktree({
+    flowDir: ctx.dir,
+    targetDir: opts.target_dir,
+    flowId: opts.flow_id,
+    featureId,
+    attempt,
+  });
+  return { target_dir: ref.path };
+}
+
+async function validatorTarget(
+  opts: RunFlowOptions,
+  ctx: DispatchCtx,
+  featureId: string,
+  attempt: number,
+): Promise<string> {
+  const ref = await worktreeForAttempt({
+    flowDir: ctx.dir,
+    targetDir: opts.target_dir,
+    flowId: opts.flow_id,
+    featureId,
+    attempt,
+  });
+  return ref.path;
+}
+
+function findFeatureTitle(
+  contract: ContractT,
+  featureId: string,
+): string | undefined {
+  for (const milestone of contract.milestones) {
+    const feature = milestone.features.find((f) => f.id === featureId);
+    if (feature) return feature.title;
+  }
+  return undefined;
+}
+
+function findMilestoneFor(contract: ContractT, featureId: string): string {
+  for (const milestone of contract.milestones) {
+    if (milestone.features.some((feature) => feature.id === featureId)) {
+      return milestone.id;
+    }
+  }
+  return "";
+}
+
+async function runWithHiddenWorktreeGitFile<T>(
+  targetDir: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const gitFile = join(targetDir, ".git");
+  const hidden = `${targetDir}.git.gflow-hidden`;
+  let moved = false;
+  try {
+    const s = await stat(gitFile);
+    if (s.isFile()) {
+      await rename(gitFile, hidden);
+      moved = true;
+    }
+  } catch {
+    // Regular repos have .git as a directory, and non-git targets have none.
+  }
+  try {
+    return await fn();
+  } finally {
+    if (moved) {
+      await rename(hidden, gitFile).catch(() => undefined);
     }
   }
 }

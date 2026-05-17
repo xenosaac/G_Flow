@@ -5,6 +5,8 @@ import type { FeatureT } from "../artifacts/contract.ts";
 import type { AssertionResultT } from "../artifacts/reports.ts";
 import { Handoff, type HandoffT } from "../artifacts/handoff.ts";
 import { loadPrompt, renderPrompt } from "./render-prompt.ts";
+import { selectAdapter } from "../gbrain/adapter.ts";
+import { retrieveContext } from "../gbrain/retrieval.ts";
 
 const WORKER_TIMEOUT_MS = 8 * 60 * 1000;
 const WORKER_RETRIES = 2;
@@ -35,6 +37,11 @@ export interface RunWorkerResult {
 /** Run a Worker (original or corrective) with timeout + retry, return its handoff. */
 export async function runWorker(input: RunWorkerInput): Promise<RunWorkerResult> {
   const template = await loadPrompt("worker");
+  const memory = await retrieveContext(selectAdapter(), {
+    role: "worker",
+    query: `Implementation hints for feature: ${input.feature.title} — ${input.feature.spec}`,
+    limit: 5,
+  });
   const prompt = renderPrompt(template, {
     target_dir: input.target_dir,
     feature_id: input.feature.id,
@@ -43,6 +50,7 @@ export async function runWorker(input: RunWorkerInput): Promise<RunWorkerResult>
     milestone_id: input.milestone_id,
     assertions_block: formatAssertions(input.feature),
     corrective_block: formatCorrective(input.failures, input.attempt),
+    gbrain_context: memory.block,
   });
 
   const timeoutMs = input.timeoutMs ?? WORKER_TIMEOUT_MS;

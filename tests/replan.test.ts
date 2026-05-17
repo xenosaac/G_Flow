@@ -7,6 +7,7 @@ import { startFlowAPI, replanFlowAPI } from "../src/runtime/flow-control.ts";
 import { writeState } from "../src/runtime/state.ts";
 import { MockBackend } from "../src/adapters/mock.ts";
 import type { FlowStateT } from "../src/artifacts/state.ts";
+import type { PlanningReviewProvider } from "../src/runtime/planning-review.ts";
 
 const v1 = {
   milestones: [
@@ -76,6 +77,15 @@ const v2 = {
 
 let TMP: string;
 
+const readyReviewProvider: PlanningReviewProvider = {
+  async runIntake() {
+    return { status: "ready", brief_md: "Ready brief.", assumptions: [] };
+  },
+  async runEngineeringReview(_goal, _brief, draft) {
+    return { status: "ready", contract: draft, raw: "{}" };
+  },
+};
+
 beforeEach(async () => {
   TMP = join(tmpdir(), `gflow-replan-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
   await mkdir(TMP, { recursive: true });
@@ -88,7 +98,13 @@ afterEach(async () => {
 describe("replanFlowAPI", () => {
   test("rewrites contract.yaml in place; preserves flow_id; bumps feature count", async () => {
     const backendV1 = new MockBackend(() => ({ stdout: JSON.stringify(v1) }));
-    const r1 = await startFlowAPI({ goal: "make a site", backend: backendV1, root: TMP });
+    const r1 = await startFlowAPI({
+      goal: "make a site",
+      backend: backendV1,
+      root: TMP,
+      planningReviewProvider: readyReviewProvider,
+    });
+    if (r1.status !== "ready") throw new Error("expected ready");
     expect(r1.features).toBe(1);
     const before = await readFile(r1.contract_path, "utf8");
 
@@ -119,7 +135,13 @@ describe("replanFlowAPI", () => {
 
   test("rejects flow not in phase=planning", async () => {
     const backend = new MockBackend(() => ({ stdout: JSON.stringify(v1) }));
-    const r1 = await startFlowAPI({ goal: "x", backend, root: TMP });
+    const r1 = await startFlowAPI({
+      goal: "x",
+      backend,
+      root: TMP,
+      planningReviewProvider: readyReviewProvider,
+    });
+    if (r1.status !== "ready") throw new Error("expected ready");
     // Manually flip state to executing on disk
     const executing: FlowStateT = {
       flow_id: r1.flow_id,

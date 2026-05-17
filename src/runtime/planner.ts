@@ -1,7 +1,17 @@
 import YAML from "yaml";
-import { Contract, type ContractT, type AssertionT } from "../artifacts/contract.ts";
+import {
+  AssertionCheck,
+  Contract,
+  UserCheck,
+  isSafeRelativePath,
+  isSafeRelativeRoute,
+  type ContractT,
+  type AssertionT,
+} from "../artifacts/contract.ts";
 import type { AgentBackend } from "../adapters/backend.ts";
 import { loadPrompt, renderPrompt } from "./render-prompt.ts";
+import { selectAdapter } from "../gbrain/adapter.ts";
+import { retrieveContext } from "../gbrain/retrieval.ts";
 
 // G1: hard depth limit. milestones → features → assertions. No fourth level.
 export const MAX_DEPTH = 3;
@@ -50,9 +60,15 @@ export class PlannerError extends Error {
 
 export async function plan(input: PlannerInput): Promise<PlannerResult> {
   const template = await loadPrompt("planner-expand-tree");
+  const memory = await retrieveContext(selectAdapter(), {
+    role: "planner",
+    query: `Planning context for goal: ${input.goal}\n\nClarifications: ${input.clarifications ?? "(none)"}`,
+    limit: 5,
+  });
   const prompt = renderPrompt(template, {
     goal: input.goal,
     clarifications: input.clarifications ?? "(none)",
+    gbrain_context: memory.block,
   });
 
   const result = await input.backend.run({
@@ -146,6 +162,8 @@ export function parseStructured(raw: string): unknown {
  *  - assertion.text is behaviorally testable (no vague-only phrasing)
  *  - assertion.evidence_required is non-empty
  *  - assertion.validator ∈ { screwdriver, user-test }
+ *  - screwdriver assertions include `check` and no `user_check`
+ *  - user-test assertions include `user_check` and no `check`
  *  - no contradictory assertion pairs within the same feature
  *
  * Returns issue strings (empty when contract is clean).
@@ -223,6 +241,7 @@ export function validateContractShape(raw: unknown): string[] {
         if (validator !== "screwdriver" && validator !== "user-test") {
           issues.push(`assertion ${aid}: validator must be screwdriver or user-test (got "${validator}")`);
         }
+        validateAssertionValidatorFields(aid, ass, issues);
         seenAssertions.push(ass as unknown as AssertionT);
       }
 
@@ -233,6 +252,60 @@ export function validateContractShape(raw: unknown): string[] {
     }
   }
   return issues;
+}
+
+function validateAssertionValidatorFields(
+  aid: string,
+  ass: Record<string, unknown>,
+  issues: string[],
+): void {
+  const validator = String(ass.validator ?? "");
+  const hasCheck = Object.prototype.hasOwnProperty.call(ass, "check");
+  const hasUserCheck = Object.prototype.hasOwnProperty.call(ass, "user_check");
+
+  if (validator === "screwdriver") {
+    if (!hasCheck) {
+      issues.push(`assertion ${aid}: screwdriver validator requires check`);
+    } else {
+      const parsed = AssertionCheck.safeParse(ass.check);
+      if (!parsed.success) {
+        issues.push(`assertion ${aid}: check is invalid: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
+      } else if (
+        (parsed.data.kind === "file_exists" || parsed.data.kind === "file_contains") &&
+        !isSafeRelativePath(parsed.data.path)
+      ) {
+        issues.push(`assertion ${aid}: check.path must be relative to target_dir and must not contain '..'`);
+      }
+    }
+    if (hasUserCheck) {
+      issues.push(`assertion ${aid}: screwdriver validator must not include user_check`);
+    }
+  }
+
+  if (validator === "user-test") {
+    if (!hasUserCheck) {
+      issues.push(`assertion ${aid}: user-test validator requires user_check`);
+    } else {
+      const parsed = UserCheck.safeParse(ass.user_check);
+      if (!parsed.success) {
+        issues.push(`assertion ${aid}: user_check is invalid: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
+      } else {
+        if (parsed.data.start === "file") {
+          if (!parsed.data.path || !isSafeRelativePath(parsed.data.path)) {
+            issues.push(`assertion ${aid}: user_check.path must be relative to target_dir and must not contain '..'`);
+          }
+        }
+        for (const [idx, step] of parsed.data.steps.entries()) {
+          if (step.kind === "goto" && !isSafeRelativeRoute(step.path)) {
+            issues.push(`assertion ${aid}: user_check.steps[${idx}].path must be relative to target_url`);
+          }
+        }
+      }
+    }
+    if (hasCheck) {
+      issues.push(`assertion ${aid}: user-test validator must not include check`);
+    }
+  }
 }
 
 function isTestable(text: string): boolean {

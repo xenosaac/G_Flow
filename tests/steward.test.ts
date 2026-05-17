@@ -138,6 +138,11 @@ describe("runStewardTriage", () => {
             text: "Logout button clears session cookie",
             validator: "user-test",
             evidence_required: "cookie inspection after click",
+            user_check: {
+              kind: "browser_flow",
+              start: "target_url",
+              steps: [{ kind: "click", selector: "#logout" }],
+            },
           },
         ],
       }),

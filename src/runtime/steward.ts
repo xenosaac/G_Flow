@@ -9,6 +9,8 @@ import type { HandoffT } from "../artifacts/handoff.ts";
 import { TriageClassification, type TriageClassificationT } from "../artifacts/reports.ts";
 import { loadPrompt, renderPrompt } from "./render-prompt.ts";
 import { parseStructured } from "./planner.ts";
+import { selectAdapter } from "../gbrain/adapter.ts";
+import { retrieveContext } from "../gbrain/retrieval.ts";
 
 const STEWARD_TIMEOUT_MS = 2 * 60 * 1000;
 const STEWARD_RETRIES = 2;
@@ -38,6 +40,11 @@ export async function runStewardEncode(
   input: RunStewardEncodeInput,
 ): Promise<RunStewardEncodeResult> {
   const template = await loadPrompt("steward-encode");
+  const memory = await retrieveContext(selectAdapter(), {
+    role: "steward_encode",
+    query: `Lessons learned for feature: ${input.feature.title} — outcome: ${input.outcome}`,
+    limit: 5,
+  });
   const prompt = renderPrompt(template, {
     flow_id: input.flow_id,
     feature_id: input.feature.id,
@@ -53,6 +60,7 @@ export async function runStewardEncode(
     usertest_block: input.usertest
       ? jsonBlock(input.usertest)
       : "(no user-test report)",
+    gbrain_context: memory.block,
   });
 
   const raw = await runWithRetries({
@@ -113,6 +121,15 @@ export async function runStewardTriage(
   }
 
   const template = await loadPrompt("steward-triage");
+  const failureSummary = (input.failures ?? [])
+    .map((f) => `${f.assertion_id}:${f.outcome}`)
+    .join(" ")
+    .slice(0, 200);
+  const memory = await retrieveContext(selectAdapter(), {
+    role: "steward_triage",
+    query: `Past triage for feature: ${input.feature.title} — failures: ${failureSummary}`,
+    limit: 5,
+  });
   const prompt = renderPrompt(template, {
     flow_id: input.flow_id,
     feature_id: input.feature.id,
@@ -128,6 +145,7 @@ export async function runStewardTriage(
     usertest_block: input.usertest
       ? jsonBlock(input.usertest)
       : "(no user-test report)",
+    gbrain_context: memory.block,
   });
 
   const raw = await runWithRetries({

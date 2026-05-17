@@ -10,6 +10,7 @@ import {
   chatPath,
 } from "../src/runtime/chat.ts";
 import { MockBackend } from "../src/adapters/mock.ts";
+import type { MemoryProvider } from "../src/runtime/memory.ts";
 
 let TMP: string;
 let prevRoot: string | undefined;
@@ -116,6 +117,72 @@ describe("sendChat", () => {
       timeoutMs: 1000,
     });
     expect(backend.calls[0]!.role).toBe("chat");
+  });
+
+  test("second turn prompt includes recent context from the first turn", async () => {
+    const backend = new MockBackend((_req, i) => ({ stdout: `reply ${i + 1}` }));
+    const sid = "s_context_0001";
+    await sendChat({
+      session_id: sid,
+      backend,
+      message: "My project is a campus event calendar.",
+      cwd: TMP,
+      timeoutMs: 1000,
+    });
+    await sendChat({
+      session_id: sid,
+      backend,
+      message: "What is the project about?",
+      cwd: TMP,
+      timeoutMs: 1000,
+    });
+    expect(backend.calls[1]!.prompt).toContain("campus event calendar");
+    expect(backend.calls[1]!.prompt).toContain("What is the project about?");
+  });
+
+  test("fake memory provider retrieval is included in the prompt", async () => {
+    const memory: MemoryProvider = {
+      async retrieveContext() {
+        return [
+          {
+            title: "Prior decision",
+            body: "Use SQLite for the prototype.",
+            source: "fake-memory",
+            score: 0.9,
+          },
+        ];
+      },
+      async writeSummary() {
+        return;
+      },
+    };
+    const backend = new MockBackend(() => ({ stdout: "ok" }));
+    await sendChat({
+      session_id: "s_memory_0001",
+      backend,
+      memoryProvider: memory,
+      message: "What storage did we choose?",
+      cwd: TMP,
+      timeoutMs: 1000,
+    });
+    expect(backend.calls[0]!.prompt).toContain("Use SQLite for the prototype.");
+  });
+
+  test("prompt size stays bounded after a long transcript", async () => {
+    const backend = new MockBackend(() => ({ stdout: "ok" }));
+    const sid = "s_bounded_0001";
+    for (let i = 0; i < 20; i++) {
+      await sendChat({
+        session_id: sid,
+        backend,
+        message: `message ${i} ${"x".repeat(400)}`,
+        cwd: TMP,
+        timeoutMs: 1000,
+      });
+    }
+    const lastPrompt = backend.calls.at(-1)!.prompt;
+    expect(lastPrompt.length).toBeLessThan(8000);
+    expect(lastPrompt).toContain("Retrieved Memory");
   });
 });
 

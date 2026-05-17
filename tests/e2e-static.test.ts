@@ -2,7 +2,7 @@
  * End-to-end synthetic test: drives runFlow against a real target_dir
  * with a fake Worker (writes the static HTML), a REAL Screwdriver (runs
  * file_exists + file_contains checks on the generated file), a fake
- * UserTest (returns pass — simulates G_FLOW_USERTEST_FAKE=pass), and a
+ * UserTest (returns pass from a fake deterministic test hook), and a
  * fake Steward.encode.
  *
  * Then loads the generated index.html in jsdom and verifies the
@@ -105,6 +105,16 @@ function buildContract(): ContractT {
                 text: "Typing 'Buy milk' and clicking Add Todo makes 'Buy milk' appear in the list",
                 validator: "user-test",
                 evidence_required: "JSDOM click trace + DOM diff",
+                user_check: {
+                  kind: "browser_flow",
+                  start: "file",
+                  path: "index.html",
+                  steps: [
+                    { kind: "fill", selector: "#todo-input", value: "Buy milk" },
+                    { kind: "click", selector: "#add-todo" },
+                    { kind: "expect_text", selector: "#todo-list", text: "Buy milk" },
+                  ],
+                },
               },
             ],
           },
@@ -149,8 +159,8 @@ const fakeWorker: typeof runWorker = async (input) => {
 };
 
 const fakeUserTest: typeof runUserTest = async (input) => {
-  // Stand-in for browser-use (which isn't installed in CI). Mirrors the
-  // shape that G_FLOW_USERTEST_FAKE=pass returns from the Python wrapper.
+  // Deterministic stand-in for the real Playwright runner; the separate
+  // user-test tests exercise selector failures and real browser behavior.
   const userAssertions = input.feature.assertions.filter((a) => a.validator === "user-test");
   return ValidatorReport.parse({
     feature_id: input.feature.id,
